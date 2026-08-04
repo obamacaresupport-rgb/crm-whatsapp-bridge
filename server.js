@@ -17,6 +17,13 @@ admin.initializeApp({ credential: admin.credential.cert(JSON.parse(process.env.F
 const db = admin.firestore();
 
 let sock = null, qrData = null, status = 'disconnected', waUser = null, connecting = false;
+let waSettingsCache=null, waSettingsAt=0;
+async function getWaSettings(){
+  const now=Date.now();
+  if(waSettingsCache && now-waSettingsAt<60000) return waSettingsCache;
+  try{ const d=await db.collection('config').doc('waSettings').get(); waSettingsCache=d.exists?d.data():{}; }catch(e){ waSettingsCache={}; }
+  waSettingsAt=now; return waSettingsCache;
+}
 
 async function connect(){
   if (connecting) return; connecting = true;
@@ -93,7 +100,8 @@ async function routeToCRM(digits, payload, pushName){
     let cid;
     if (c) cid = c.id;
     else {
-      const ref = await db.collection('clients').add({ nombre: pushName || ('+'+digits), telefono: digits, pipeline: 'Sin Contactos', stage: 'Nuevo lead', origen: 'WhatsApp', createdAt: Date.now() });
+      const ws = await getWaSettings();
+      const ref = await db.collection('clients').add({ nombre: pushName || ('+'+digits), telefono: digits, pipeline: ws.pipelineInbound || 'Sin Contactos', stage: 'Nuevo lead', origen: 'WhatsApp', createdAt: Date.now() });
       cid = ref.id; console.log('🆕 Cliente creado desde WhatsApp:', cid);
     }
     await db.collection('clients').doc(cid).collection('whatsapp').add(payload);
