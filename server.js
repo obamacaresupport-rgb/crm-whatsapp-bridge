@@ -75,7 +75,7 @@ async function connect(){
 
 async function routeToCRM(digits, payload, pushName){
   try{
-    if (!digits || digits.length < 7) return;
+    if (!digits || digits.length < 7 || digits.length > 15) return;
     const snap = await db.collection('clients').get();
     let c = snap.docs.find(d => (d.data().telefono||'').replace(/\D/g,'') === digits);
     if (!c) c = snap.docs.find(d => { const t=(d.data().telefono||'').replace(/\D/g,''); return t.length>=7 && (digits.endsWith(t) || t.endsWith(digits)); });
@@ -102,7 +102,7 @@ app.get('/chats', auth, (req,res)=>{
     if (status!=='connected') return res.json({ ok:false, error:'No conectado' });
     const seen={}, list=[];
     for (const c of Object.values(sock.chats||{})){
-      const d=jidDigits(c.id); if(!d || d.length<10 || seen[d]) continue; seen[d]=1;
+      const d=jidDigits(c.id);       if(!d || d.length<10 || d.length>15 || seen[d]) continue; seen[d]=1;
       list.push({ jid:d, name:c.name||('+'+d) });
     }
     res.json({ ok:true, chats:list });
