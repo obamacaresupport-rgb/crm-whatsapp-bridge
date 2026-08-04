@@ -3,6 +3,7 @@ import cors from 'cors';
 import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, downloadMediaMessage } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import fs from 'fs';
+import Jimp from 'jimp';
 import admin from 'firebase-admin';
 
 process.on('uncaughtException', e => console.error('[KEEP-ALIVE] uncaughtException:', e.message));
