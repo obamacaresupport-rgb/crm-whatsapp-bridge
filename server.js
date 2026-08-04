@@ -48,14 +48,24 @@ async function connect(){
             if (im || au || doc){
               try{
                 const buf = await downloadMediaMessage(m);
-                if (buf && buf.length <= 700*1024){
-                  const mime = im?.mimetype || au?.mimetype || doc?.mimetype || 'application/octet-stream';
+                                let data = null; const mime = im?.mimetype || au?.mimetype || doc?.mimetype || 'application/octet-stream';
+                if (buf && buf.length <= 700*1024) data = 'data:'+mime+';base64,'+buf.toString('base64');
+                else if (buf && im){
+                  try{
+                    const img = await Jimp.read(buf);
+                    img.resize(1280, Jimp.AUTO); img.quality(72);
+                    const out = await img.getBufferAsync(Jimp.MIME_JPEG);
+                    if (out.length <= 900*1024) data = 'data:image/jpeg;base64,'+out.toString('base64');
+                  }
+                  catch(e){ console.error('jimp:', e.message); }
+                }
+                if (data){
                   payload.type = im ? 'image' : (au ? 'audio' : 'file');
-                  payload.url = 'data:'+mime+';base64,'+buf.toString('base64');
+                  payload.url = data;
                   payload.fileName = doc?.fileName || (au ? 'audio.ogg' : 'imagen.jpg');
                   payload.size = buf.length;
                   payload.text = im?.caption || '';
-                } else payload.text = im ? '🖼️ Imagen recibida (pesada)' : (au ? '🎤 Audio recibido (pesado)' : '📄 Archivo recibido (pesado)');
+                } else payload.text = im ? '🖼️ Imagen demasiado pesada incluso comprimida' : (au ? '🎤 Audio recibido (pesado)' : '📄 Archivo recibido (pesado)');
               }catch(e){ payload.text = '📎 Adjunto no descargable'; }
             } else {
               const text = m.message?.conversation || m.message?.extendedTextMessage?.text;
