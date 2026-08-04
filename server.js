@@ -5,7 +5,6 @@ import { Boom } from '@hapi/boom';
 import fs from 'fs';
 import admin from 'firebase-admin';
 
-/* === BLINDAJE: ningún error interno puede matar el proceso === */
 process.on('uncaughtException', e => console.error('[KEEP-ALIVE] uncaughtException:', e.message));
 process.on('unhandledRejection', e => console.error('[KEEP-ALIVE] unhandledRejection:', String((e && e.message) || e)));
 
@@ -44,7 +43,7 @@ async function connect(){
             if (m.key.fromMe) continue;
             const text = m.message?.conversation || m.message?.extendedTextMessage?.text || (m.message?.imageMessage ? '🖼️ Imagen recibida' : (m.message?.audioMessage ? '🎤 Audio recibido' : ''));
             if (!text) continue;
-            await routeToCRM((m.key.remoteJid||'').split('@')[0], text);
+            await routeToCRM((m.key.remoteJid||'').split('@')[0], text, m.pushName);
           }catch(e){ console.error('[msg]', e.message); }
         }
       }catch(e){ console.error('[upsert]', e.message); }
@@ -56,15 +55,21 @@ async function connect(){
   connecting = false;
 }
 
-async function routeToCRM(phone, text){
+async function routeToCRM(phone, text, pushName){
   try{
     const digits = phone.replace(/\D/g,'');
     const snap = await db.collection('clients').get();
     let c = snap.docs.find(d => (d.data().telefono||'').replace(/\D/g,'') === digits);
     if (!c) c = snap.docs.find(d => { const t=(d.data().telefono||'').replace(/\D/g,''); return t.length>=7 && (digits.endsWith(t) || t.endsWith(digits)); });
-    if (!c) return;
-    await db.collection('clients').doc(c.id).collection('whatsapp').add({ from:'in', text, ts: Date.now() });
-    console.log('📥 Mensaje entrante ruteado al cliente', c.id);
+    let cid;
+    if (c) cid = c.id;
+    else {
+      const ref = await db.collection('clients').add({ nombre: pushName || ('+'+digits), telefono: digits, pipeline: 'Sin Contactos', stage: 'Nuevo lead', origen: 'WhatsApp', createdAt: Date.now() });
+      cid = ref.id;
+      console.log('🆕 Cliente creado desde WhatsApp:', cid);
+    }
+    await db.collection('clients').doc(cid).collection('whatsapp').add({ from:'in', text, ts: Date.now() });
+    console.log('📥 Mensaje ruteado al cliente', cid);
   }catch(e){ console.error('route:', e.message); }
 }
 
