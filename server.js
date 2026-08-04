@@ -1,6 +1,6 @@
 import express from 'express';
 import cors from 'cors';
-import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
+import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, downloadMediaMessage } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import fs from 'fs';
 import admin from 'firebase-admin';
@@ -10,6 +10,7 @@ process.on('unhandledRejection', e => console.error('[KEEP-ALIVE] unhandledRejec
 
 const PORT = process.env.PORT || 10000;
 const TOKEN = process.env.BRIDGE_TOKEN || 'CNX-BRIDGE-2026';
+const jidDigits = j => (j||'').split('@')[0].split(':')[0].replace(/\D/g,'');
 
 admin.initializeApp({ credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)) });
 const db = admin.firestore();
@@ -41,9 +42,26 @@ async function connect(){
         for (const m of messages){
           try{
             if (m.key.fromMe) continue;
-            const text = m.message?.conversation || m.message?.extendedTextMessage?.text || (m.message?.imageMessage ? '🖼️ Imagen recibida' : (m.message?.audioMessage ? '🎤 Audio recibido' : ''));
-            if (!text) continue;
-            await routeToCRM((m.key.remoteJid||'').split('@')[0], text, m.pushName);
+            const payload = { from:'in', ts: Date.now() };
+            const im = m.message?.imageMessage, au = m.message?.audioMessage, doc = m.message?.documentMessage;
+            if (im || au || doc){
+              try{
+                const buf = await downloadMediaMessage(m);
+                if (buf && buf.length <= 700*1024){
+                  const mime = im?.mimetype || au?.mimetype || doc?.mimetype || 'application/octet-stream';
+                  payload.type = im ? 'image' : (au ? 'audio' : 'file');
+                  payload.url = 'data:'+mime+';base64,'+buf.toString('base64');
+                  payload.fileName = doc?.fileName || (au ? 'audio.ogg' : 'imagen.jpg');
+                  payload.size = buf.length;
+                  payload.text = im?.caption || '';
+                } else payload.text = im ? '🖼️ Imagen recibida (pesada)' : (au ? '🎤 Audio recibido (pesado)' : '📄 Archivo recibido (pesado)');
+              }catch(e){ payload.text = '📎 Adjunto no descargable'; }
+            } else {
+              const text = m.message?.conversation || m.message?.extendedTextMessage?.text;
+              if (!text) continue;
+              payload.text = text;
+            }
+            await routeToCRM(jidDigits(m.key.remoteJid), payload, m.pushName);
           }catch(e){ console.error('[msg]', e.message); }
         }
       }catch(e){ console.error('[upsert]', e.message); }
@@ -55,9 +73,9 @@ async function connect(){
   connecting = false;
 }
 
-async function routeToCRM(phone, text, pushName){
+async function routeToCRM(digits, payload, pushName){
   try{
-    const digits = phone.replace(/\D/g,'');
+    if (!digits || digits.length < 7) return;
     const snap = await db.collection('clients').get();
     let c = snap.docs.find(d => (d.data().telefono||'').replace(/\D/g,'') === digits);
     if (!c) c = snap.docs.find(d => { const t=(d.data().telefono||'').replace(/\D/g,''); return t.length>=7 && (digits.endsWith(t) || t.endsWith(digits)); });
@@ -65,10 +83,9 @@ async function routeToCRM(phone, text, pushName){
     if (c) cid = c.id;
     else {
       const ref = await db.collection('clients').add({ nombre: pushName || ('+'+digits), telefono: digits, pipeline: 'Sin Contactos', stage: 'Nuevo lead', origen: 'WhatsApp', createdAt: Date.now() });
-      cid = ref.id;
-      console.log('🆕 Cliente creado desde WhatsApp:', cid);
+      cid = ref.id; console.log('🆕 Cliente creado desde WhatsApp:', cid);
     }
-    await db.collection('clients').doc(cid).collection('whatsapp').add({ from:'in', text, ts: Date.now() });
+    await db.collection('clients').doc(cid).collection('whatsapp').add(payload);
     console.log('📥 Mensaje ruteado al cliente', cid);
   }catch(e){ console.error('route:', e.message); }
 }
@@ -82,8 +99,12 @@ app.get('/', (req,res)=> res.send('CRM Nexus WhatsApp Bridge ✅'));
 app.get('/health', (req,res)=> res.json({ ok:true, status, waUser }));
 app.get('/chats', auth, (req,res)=>{
   try{
-    if(status!=='connected') return res.json({ ok:false, error:'No conectado' });
-    const list=Object.values(sock.chats||{}).map(c=>({ jid:c.id||'', name:c.name||'' })).filter(c=>c.jid.endsWith('@s.whatsapp.net'));
+    if (status!=='connected') return res.json({ ok:false, error:'No conectado' });
+    const seen={}, list=[];
+    for (const c of Object.values(sock.chats||{})){
+      const d=jidDigits(c.id); if(!d || d.length<10 || seen[d]) continue; seen[d]=1;
+      list.push({ jid:d, name:c.name||('+'+d) });
+    }
     res.json({ ok:true, chats:list });
   }catch(e){ res.status(500).json({ ok:false, error:String(e.message||e) }); }
 });
