@@ -80,6 +80,13 @@ const auth = (req,res,next)=> req.headers['x-token']===TOKEN ? next() : res.stat
 
 app.get('/', (req,res)=> res.send('CRM Nexus WhatsApp Bridge ✅'));
 app.get('/health', (req,res)=> res.json({ ok:true, status, waUser }));
+app.get('/chats', auth, (req,res)=>{
+  try{
+    if(status!=='connected') return res.json({ ok:false, error:'No conectado' });
+    const list=Object.values(sock.chats||{}).map(c=>({ jid:c.id||'', name:c.name||'' })).filter(c=>c.jid.endsWith('@s.whatsapp.net'));
+    res.json({ ok:true, chats:list });
+  }catch(e){ res.status(500).json({ ok:false, error:String(e.message||e) }); }
+});
 app.get('/qr', auth, (req,res)=> res.json({ ok:true, status, qr: qrData }));
 app.post('/send', auth, async (req,res)=>{
   try{
