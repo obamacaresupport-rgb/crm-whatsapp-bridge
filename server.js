@@ -56,7 +56,12 @@ async function connect(inst){
                 else payload.text=im?'🖼️ Imagen muy pesada':(au?'🎤 Audio recibido':'📄 Archivo recibido');
               }catch(e){ payload.text='📎 Adjunto no descargable'; }
             } else { const text=m.message?.conversation||m.message?.extendedTextMessage?.text; if(!text) continue; payload.text=text; }
-            await routeToCRM(inst, jidDigits(m.key.remoteJid), payload, m.pushName);
+            /* --- Resolver número real si WhatsApp mandó ID oculto (LID) --- */
+            let jidRaw = m.key.remoteJid||'';
+            if (jidRaw.endsWith('@lid') || jidDigits(jidRaw).length>15){
+              try{ const pn = await inst.sock.signalRepository.lidMapping.getPNForLID(jidRaw); if(pn) jidRaw = pn; }catch(e){}
+            }
+            await routeToCRM(inst, jidDigits(jidRaw), payload, m.pushName);
           }catch(e){ console.error('[msg]', e.message); }
         }
       }catch(e){ console.error('[upsert]', e.message); }
@@ -70,18 +75,21 @@ async function getWaSettings(){ const now=Date.now(); if(waSettingsCache&&now-wa
 
 async function routeToCRM(inst, digits, payload, pushName){
   try{
-    if (!digits || digits.length<7 || digits.length>15) return;
     const snap=await db.collection('clients').get();
-    let c=snap.docs.find(d=>(d.data().telefono||'').replace(/\D/g,'')===digits && (d.data().waInst||1)===Number(inst.id));
-    if (!c) c=snap.docs.find(d=>{ const t=(d.data().telefono||'').replace(/\D/g,''); return t.length>=7 && (digits.endsWith(t)||t.endsWith(digits)); });
-    let cid;
-    if (c) cid=c.id;
-    else {
+    let c=null;
+    if (digits && digits.length>=10 && digits.length<=15){
+      c=snap.docs.find(d=>(d.data().telefono||'').replace(/\D/g,'')===digits && (d.data().waInst||1)===Number(inst.id));
+      if(!c) c=snap.docs.find(d=>{ const t=(d.data().telefono||'').replace(/\D/g,''); return t.length>=7 && (digits.endsWith(t)||t.endsWith(digits)); });
+    }
+    if(!c && pushName) c=snap.docs.find(d=>(d.data().nombre||'')===pushName && (d.data().waInst||1)===Number(inst.id));
+    if(!c){
+      if(!digits || digits.length<10 || digits.length>15) return;
       const ws=await getWaSettings(); const set=(ws&&ws[inst.id])||{};
       const ref=await db.collection('clients').add({ nombre:pushName||('+'+digits), telefono:digits, pipeline:set.pipelineInbound||'Sin Contactos', stage:'Nuevo lead', origen:'WhatsApp', waInst:Number(inst.id), createdAt:Date.now() });
-      cid=ref.id; console.log('🆕 Cliente WA'+inst.id+':', cid);
+      console.log('🆕 Cliente WA'+inst.id+':', ref.id);
+      c={ id: ref.id };
     }
-    await db.collection('clients').doc(cid).collection('whatsapp').add(payload);
+    await db.collection('clients').doc(c.id).collection('whatsapp').add(payload);
   }catch(e){ console.error('route:', e.message); }
 }
 
