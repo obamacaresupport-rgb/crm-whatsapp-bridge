@@ -56,12 +56,12 @@ async function connect(inst){
                 else payload.text=im?'🖼️ Imagen muy pesada':(au?'🎤 Audio recibido':'📄 Archivo recibido');
               }catch(e){ payload.text='📎 Adjunto no descargable'; }
             } else { const text=m.message?.conversation||m.message?.extendedTextMessage?.text; if(!text) continue; payload.text=text; }
-            /* --- Resolver número real si WhatsApp mandó ID oculto (LID) --- */
             let jidRaw = m.key.remoteJid||'';
-            if (jidRaw.endsWith('@lid') || jidDigits(jidRaw).length>15){
+            const lid = jidRaw.endsWith('@lid') ? jidRaw : '';
+            if (lid || jidDigits(jidRaw).length>15){
               try{ const pn = await inst.sock.signalRepository.lidMapping.getPNForLID(jidRaw); if(pn) jidRaw = pn; }catch(e){}
             }
-            await routeToCRM(inst, jidDigits(jidRaw), payload, m.pushName);
+            await routeToCRM(inst, jidDigits(jidRaw), payload, m.pushName, lid||((jidRaw!==m.key.remoteJid)?'':(m.key.remoteJid||'')));
           }catch(e){ console.error('[msg]', e.message); }
         }
       }catch(e){ console.error('[upsert]', e.message); }
@@ -73,24 +73,27 @@ async function connect(inst){
 let waSettingsCache=null, waSettingsAt=0;
 async function getWaSettings(){ const now=Date.now(); if(waSettingsCache&&now-waSettingsAt<60000) return waSettingsCache; try{ const d=await db.collection('config').doc('waSettings').get(); waSettingsCache=d.exists?d.data():{}; }catch(e){ waSettingsCache={}; } waSettingsAt=now; return waSettingsCache; }
 
-async function routeToCRM(inst, digits, payload, pushName){
+async function routeToCRM(inst, digits, payload, pushName, lid){
   try{
     const snap=await db.collection('clients').get();
     let c=null;
-    if (digits && digits.length>=10 && digits.length<=15){
+    if (lid) c=snap.docs.find(d=>(d.data().lid||'')===(lid||'') && (d.data().waInst||1)===Number(inst.id) && (d.data().lid||'')!=='');
+    if (!c && digits && digits.length>=10 && digits.length<=15){
       c=snap.docs.find(d=>(d.data().telefono||'').replace(/\D/g,'')===digits && (d.data().waInst||1)===Number(inst.id));
       if(!c) c=snap.docs.find(d=>{ const t=(d.data().telefono||'').replace(/\D/g,''); return t.length>=7 && (digits.endsWith(t)||t.endsWith(digits)); });
     }
-    if(!c && pushName) c=snap.docs.find(d=>(d.data().nombre||'')===pushName && (d.data().waInst||1)===Number(inst.id));
-    if(!c){
-      if(!digits || digits.length<10 || digits.length>15) return;
+    if (!c && pushName) c=snap.docs.find(d=>(d.data().nombre||'')===pushName && (d.data().waInst||1)===Number(inst.id));
+    if (!c){
       const ws=await getWaSettings(); const set=(ws&&ws[inst.id])||{};
-      const ref=await db.collection('clients').add({ nombre:pushName||('+'+digits), telefono:digits, pipeline:set.pipelineInbound||'Sin Contactos', stage:'Nuevo lead', origen:'WhatsApp', waInst:Number(inst.id), unread:1, createdAt:Date.now() });
+      const data={ nombre:pushName||('+'+(digits||'desconocido')), telefono:(digits&&digits.length>=10&&digits.length<=15)?digits:'', pipeline:set.pipelineInbound||'Sin Contactos', stage:'Nuevo lead', origen:'WhatsApp', waInst:Number(inst.id), unread:1, createdAt:Date.now() };
+      if (lid) data.lid=lid;
+      const ref=await db.collection('clients').add(data);
       console.log('🆕 Cliente WA'+inst.id+':', ref.id);
-      c={ id: ref.id };
+      c={ id:ref.id };
     }
     await db.collection('clients').doc(c.id).collection('whatsapp').add(payload);
     await db.collection('clients').doc(c.id).update({ unread: admin.firestore.FieldValue.increment(1) });
+    console.log('📥 Mensaje ruteado WA'+inst.id+' →', c.id);
   }catch(e){ console.error('route:', e.message); }
 }
 
@@ -100,7 +103,7 @@ app.use(express.json({ limit:'2mb' }));
 const auth=(req,res,next)=> req.headers['x-token']===TOKEN ? next() : res.status(401).json({ok:false,error:'No autorizado'});
 const waOf=req=>{ const v=parseInt(req.query.wa||(req.body&&req.body.wa)||'1',10); return INST[v]||INST[1]; };
 
-app.get('/', (req,res)=> res.send('CRM Nexus WhatsApp Bridge (2 líneas) ✅'));
+app.get('/', (req,res)=> res.send('CRM Nexus WhatsApp Bridge v8 ✅'));
 app.get('/health', (req,res)=> res.json({ ok:true, wa1:INST[1].status, wa2:INST[2].status }));
 app.get('/qr', auth, (req,res)=>{ const inst=waOf(req); res.json({ ok:true, status:inst.status, qr:inst.qr }); });
 app.get('/chats', auth, (req,res)=>{
