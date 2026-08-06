@@ -85,11 +85,12 @@ async function routeToCRM(inst, digits, payload, pushName){
     if(!c){
       if(!digits || digits.length<10 || digits.length>15) return;
       const ws=await getWaSettings(); const set=(ws&&ws[inst.id])||{};
-      const ref=await db.collection('clients').add({ nombre:pushName||('+'+digits), telefono:digits, pipeline:set.pipelineInbound||'Sin Contactos', stage:'Nuevo lead', origen:'WhatsApp', waInst:Number(inst.id), createdAt:Date.now() });
+      const ref=await db.collection('clients').add({ nombre:pushName||('+'+digits), telefono:digits, pipeline:set.pipelineInbound||'Sin Contactos', stage:'Nuevo lead', origen:'WhatsApp', waInst:Number(inst.id), unread:1, createdAt:Date.now() });
       console.log('🆕 Cliente WA'+inst.id+':', ref.id);
       c={ id: ref.id };
     }
     await db.collection('clients').doc(c.id).collection('whatsapp').add(payload);
+    await db.collection('clients').doc(c.id).update({ unread: admin.firestore.FieldValue.increment(1) });
   }catch(e){ console.error('route:', e.message); }
 }
 
