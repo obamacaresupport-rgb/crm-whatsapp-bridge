@@ -84,11 +84,12 @@ async function connect(inst){
               }catch(e){ payload.text='📎 Adjunto no descargable'; }
             } else { const text=m.message?.conversation||m.message?.extendedTextMessage?.text; if(!text) continue; payload.text=text; }
             let jidRaw = m.key.remoteJid||'';
-            const lid = jidRaw.endsWith('@lid') ? jidRaw : '';
+            const wasLid = jidRaw.endsWith('@lid');
+            const lid = wasLid ? jidRaw : '';
             if (lid || jidDigits(jidRaw).length>15){
               try{ const pn = await inst.sock.signalRepository.lidMapping.getPNForLID(jidRaw); if(pn) jidRaw = pn; }catch(e){}
             }
-            await routeToCRM(inst, jidDigits(jidRaw), payload, m.pushName, lid);
+              await routeToCRM(inst, jidDigits(jidRaw), payload, m.pushName, lid, wasLid);
           }catch(e){ console.error('[msg]', e.message); }
         }
       }catch(e){ console.error('[upsert]', e.message); }
@@ -100,19 +101,19 @@ async function connect(inst){
 let waSettingsCache=null, waSettingsAt=0;
 async function getWaSettings(){ const now=Date.now(); if(waSettingsCache&&now-waSettingsAt<60000) return waSettingsCache; try{ const d=await db.collection('config').doc('waSettings').get(); waSettingsCache=d.exists?d.data():{}; }catch(e){ waSettingsCache={}; } waSettingsAt=now; return waSettingsCache; }
 
-async function routeToCRM(inst, digits, payload, pushName, lid){
+async function routeToCRM(inst, digits, payload, pushName, lid, wasLid){
   try{
     const snap=await db.collection('clients').get();
     let c=null;
     if (lid) c=snap.docs.find(d=>(d.data().lid||'')!=='' && (d.data().lid||'')===lid && (d.data().waInst||1)===Number(inst.id));
-    if (!c && digits && digits.length>=10 && digits.length<=15){
+    if (!c && !wasLid && digits && digits.length>=10 && digits.length<=15){
       c=snap.docs.find(d=>(d.data().telefono||'').replace(/\D/g,'')===digits && (d.data().waInst||1)===Number(inst.id));
       if(!c) c=snap.docs.find(d=>{ const t=(d.data().telefono||'').replace(/\D/g,''); return t.length>=7 && (digits.endsWith(t)||t.endsWith(digits)); });
     }
     if (!c && pushName) c=snap.docs.find(d=>(d.data().nombre||'')===pushName && (d.data().waInst||1)===Number(inst.id));
     if (!c){
       const ws=await getWaSettings(); const set=(ws&&ws[inst.id])||{};
-      const data={ nombre:pushName||('+'+(digits||'desconocido')), telefono:(digits&&digits.length>=10&&digits.length<=15)?digits:'', pipeline:set.pipelineInbound||'Sin Contactos', stage:'Nuevo lead', origen:'WhatsApp', waInst:Number(inst.id), unread:1, lastMsgTs:payload.ts||Date.now(), createdAt:Date.now() };
+      const data={ nombre:pushName||('+'+(digits||'desconocido')), telefono:(!wasLid&&digits&&digits.length>=10&&digits.length<=15)?digits:'', pipeline:set.pipelineInbound||'Sin Contactos', stage:'Nuevo lead', origen:'WhatsApp', waInst:Number(inst.id), unread:1, lastMsgTs:payload.ts||Date.now(), createdAt:Date.now() };
       if (lid) data.lid=lid;
       const ref=await db.collection('clients').add(data);
       c={ id:ref.id };
@@ -154,3 +155,4 @@ app.post('/send', auth, async (req,res)=>{
 });
 
 app.listen(PORT, ()=>{ console.log('Bridge listo en puerto', PORT); connect(INST[1]); connect(INST[2]); });
+setInterval(async ()=>{ for(const inst of [INST[1],INST[2]]){ if(inst.status==='connected'){ try{ await inst.sock.sendPresenceUpdate('available'); }catch(e){ console.log('♻️ reconectando WA'+inst.id); inst.status='disconnected'; inst.connecting=false; connect(inst); } } } }, 120000);
