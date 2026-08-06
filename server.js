@@ -19,6 +19,19 @@ const db = admin.firestore();
 function mkInst(id){ return { id, sock:null, qr:null, status:'disconnected', connecting:false, dir:'./session'+id }; }
 const INST = { 1: mkInst(1), 2: mkInst(2) };
 
+async function storeMedia(cid, buf, mime, fileName){
+  const b64 = buf.toString('base64');
+  const CHUNK = 700*1024;
+  const attId = Date.now()+'_'+Math.random().toString(36).slice(2,8);
+  const parts = []; for(let i=0;i<b64.length;i+=CHUNK) parts.push(b64.slice(i,i+CHUNK));
+  const batch = db.batch();
+  const attRef = db.collection('clients').doc(cid).collection('attachments').doc(attId);
+  batch.set(attRef,{mime,fileName,size:buf.length,n:parts.length,ts:Date.now()});
+  parts.forEach((p,i)=>batch.set(attRef.collection('chunks').doc(String(i).padStart(4,'0')),{i,d:p}));
+  await batch.commit();
+  return attId;
+}
+
 async function connect(inst){
   if (inst.connecting) return; inst.connecting = true;
   try{
@@ -49,11 +62,25 @@ async function connect(inst){
             if (im||au||doc){
               try{
                 const buf=await downloadMediaMessage(m);
-                let data=null; const mime=im?.mimetype||au?.mimetype||doc?.mimetype||'application/octet-stream';
-                if (buf && buf.length<=700*1024) data='data:'+mime+';base64,'+buf.toString('base64');
-                else if (buf && im){ try{ const img=await Jimp.read(buf); img.resize(1280,Jimp.AUTO); img.quality(72); const out=await img.getBufferAsync(Jimp.MIME_JPEG); if(out.length<=900*1024) data='data:image/jpeg;base64,'+out.toString('base64'); }catch(e){} }
-                if (data){ payload.type=im?'image':(au?'audio':'file'); payload.url=data; payload.fileName=doc?.fileName||(au?'audio.ogg':'imagen.jpg'); payload.size=buf.length; payload.text=im?.caption||''; }
-                else payload.text=im?'🖼️ Imagen muy pesada':(au?'🎤 Audio recibido':'📄 Archivo recibido');
+                const mime=im?.mimetype||au?.mimetype||doc?.mimetype||'application/octet-stream';
+                payload.type=im?'image':(au?'audio':'file');
+                payload.fileName=doc?.fileName||(au?'audio.ogg':(im?'imagen.jpg':'archivo'));
+                payload.size=buf?buf.length:0;
+                payload.text=im?.caption||(doc?doc.fileName:'');
+                let inlined=false;
+                if (buf && im){
+                  try{
+                    const img=await Jimp.read(buf);
+                    for (const [w,q] of [[1024,0.7],[800,0.55],[640,0.4]]){
+                      img.resize(w,Jimp.AUTO);
+                      const out=await img.getBufferAsync(Jimp.MIME_JPEG);
+                      if (out.length<=650*1024){ payload.url='data:image/jpeg;base64,'+out.toString('base64'); inlined=true; break; }
+                    }
+                  }catch(e){ console.error('jimp:',e.message); }
+                } else if (buf && buf.length<=650*1024){
+                  payload.url='data:'+mime+';base64,'+buf.toString('base64'); inlined=true;
+                }
+                if (!inlined && buf){ payload._buf=buf; payload._mime=mime; }
               }catch(e){ payload.text='📎 Adjunto no descargable'; }
             } else { const text=m.message?.conversation||m.message?.extendedTextMessage?.text; if(!text) continue; payload.text=text; }
             let jidRaw = m.key.remoteJid||'';
@@ -61,7 +88,7 @@ async function connect(inst){
             if (lid || jidDigits(jidRaw).length>15){
               try{ const pn = await inst.sock.signalRepository.lidMapping.getPNForLID(jidRaw); if(pn) jidRaw = pn; }catch(e){}
             }
-            await routeToCRM(inst, jidDigits(jidRaw), payload, m.pushName, lid||((jidRaw!==m.key.remoteJid)?'':(m.key.remoteJid||'')));
+            await routeToCRM(inst, jidDigits(jidRaw), payload, m.pushName, lid);
           }catch(e){ console.error('[msg]', e.message); }
         }
       }catch(e){ console.error('[upsert]', e.message); }
@@ -77,7 +104,7 @@ async function routeToCRM(inst, digits, payload, pushName, lid){
   try{
     const snap=await db.collection('clients').get();
     let c=null;
-    if (lid) c=snap.docs.find(d=>(d.data().lid||'')===(lid||'') && (d.data().waInst||1)===Number(inst.id) && (d.data().lid||'')!=='');
+    if (lid) c=snap.docs.find(d=>(d.data().lid||'')!=='' && (d.data().lid||'')===lid && (d.data().waInst||1)===Number(inst.id));
     if (!c && digits && digits.length>=10 && digits.length<=15){
       c=snap.docs.find(d=>(d.data().telefono||'').replace(/\D/g,'')===digits && (d.data().waInst||1)===Number(inst.id));
       if(!c) c=snap.docs.find(d=>{ const t=(d.data().telefono||'').replace(/\D/g,''); return t.length>=7 && (digits.endsWith(t)||t.endsWith(digits)); });
@@ -85,14 +112,18 @@ async function routeToCRM(inst, digits, payload, pushName, lid){
     if (!c && pushName) c=snap.docs.find(d=>(d.data().nombre||'')===pushName && (d.data().waInst||1)===Number(inst.id));
     if (!c){
       const ws=await getWaSettings(); const set=(ws&&ws[inst.id])||{};
-      const data={ nombre:pushName||('+'+(digits||'desconocido')), telefono:(digits&&digits.length>=10&&digits.length<=15)?digits:'', pipeline:set.pipelineInbound||'Sin Contactos', stage:'Nuevo lead', origen:'WhatsApp', waInst:Number(inst.id), unread:1, createdAt:Date.now() };
+      const data={ nombre:pushName||('+'+(digits||'desconocido')), telefono:(digits&&digits.length>=10&&digits.length<=15)?digits:'', pipeline:set.pipelineInbound||'Sin Contactos', stage:'Nuevo lead', origen:'WhatsApp', waInst:Number(inst.id), unread:1, lastMsgTs:payload.ts||Date.now(), createdAt:Date.now() };
       if (lid) data.lid=lid;
       const ref=await db.collection('clients').add(data);
-      console.log('🆕 Cliente WA'+inst.id+':', ref.id);
       c={ id:ref.id };
     }
+    if (payload._buf){
+      try{ payload.att=await storeMedia(c.id,payload._buf,payload._mime||'application/octet-stream',payload.fileName||'archivo'); }
+      catch(e){ console.error('att:',e.message); payload.text=payload.text||'📎 Adjunto no almacenado'; }
+      delete payload._buf; delete payload._mime;
+    }
     await db.collection('clients').doc(c.id).collection('whatsapp').add(payload);
-    await db.collection('clients').doc(c.id).update({ unread: admin.firestore.FieldValue.increment(1) });
+    await db.collection('clients').doc(c.id).update({ unread: admin.firestore.FieldValue.increment(1), lastMsgTs: payload.ts||Date.now() });
     console.log('📥 Mensaje ruteado WA'+inst.id+' →', c.id);
   }catch(e){ console.error('route:', e.message); }
 }
@@ -103,7 +134,7 @@ app.use(express.json({ limit:'2mb' }));
 const auth=(req,res,next)=> req.headers['x-token']===TOKEN ? next() : res.status(401).json({ok:false,error:'No autorizado'});
 const waOf=req=>{ const v=parseInt(req.query.wa||(req.body&&req.body.wa)||'1',10); return INST[v]||INST[1]; };
 
-app.get('/', (req,res)=> res.send('CRM Nexus WhatsApp Bridge v8 ✅'));
+app.get('/', (req,res)=> res.send('CRM Nexus WhatsApp Bridge v9 ✅'));
 app.get('/health', (req,res)=> res.json({ ok:true, wa1:INST[1].status, wa2:INST[2].status }));
 app.get('/qr', auth, (req,res)=>{ const inst=waOf(req); res.json({ ok:true, status:inst.status, qr:inst.qr }); });
 app.get('/chats', auth, (req,res)=>{
