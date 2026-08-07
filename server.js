@@ -49,6 +49,8 @@ async function connect(inst){
         }
       }catch(e){ console.error('[conn]', e.message); }
     });
+    inst.presence={};
+    inst.sock.ev.on('presence.update', ({ id, presences })=>{ try{ for(const p of Object.values(presences||{})){ if(p?.lastKnownPresence==='composing') inst.presence[id]={ts:Date.now()}; } }catch(e){} });
     /* ✔️ Checks de entregado/visto en tiempo real */
     inst.sock.ev.on('messages.update', async (updates)=>{
       try{ for(const u of updates){ const st=u.update?.status; if(!u.key?.fromMe||!st||st<3) continue;
@@ -61,6 +63,7 @@ async function connect(inst){
         for (const m of messages){
           try{
             if (m.key.fromMe) continue;
+            if ((m.key.remoteJid||'').endsWith('@broadcast')) continue;
             console.log('📥 upsert WA'+inst.id+':', m.key.remoteJid, m.pushName||'');
             const payload = { from:'in', ts:Date.now() };
             const im=m.message?.imageMessage, au=m.message?.audioMessage, doc=m.message?.documentMessage, vi=m.message?.videoMessage, stk=m.message?.stickerMessage, rea=m.message?.reactionMessage;
@@ -182,6 +185,10 @@ app.post('/react', auth, async (req,res)=>{
     res.json({ ok:true });
   }catch(e){ res.status(500).json({ ok:false, error:String(e.message||e) }); }
 });
+
+app.get('/presence', auth, (req,res)=>{ const inst=waOf(req); const now=Date.now(); const out={};
+  for(const [jid,v] of Object.entries(inst.presence||{})){ if(now-(v.ts||0)<6000) out[jid]=true; }
+  res.json({ ok:true, presence:out }); });
 
 app.listen(PORT, ()=>{ console.log('Bridge listo en puerto', PORT); connect(INST[1]); connect(INST[2]); });
 setInterval(async ()=>{ for(const inst of [INST[1],INST[2]]){ if(inst.status==='connected'){ try{ await inst.sock.sendPresenceUpdate('available'); }catch(e){ console.log('♻️ reconectando WA'+inst.id); inst.status='disconnected'; inst.connecting=false; connect(inst); } } } }, 120000);
