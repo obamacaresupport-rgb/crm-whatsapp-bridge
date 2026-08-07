@@ -54,6 +54,7 @@ async function connect(inst){
     inst.sock.ev.on('messages.upsert', async ({ messages, type }) => {
       try{
         if (type !== 'notify') return;
+        console.log('📥 upsert WA'+inst.id+':', m.key.remoteJid, m.pushName||'');
         for (const m of messages){
           try{
             if (m.key.fromMe) continue;
@@ -131,7 +132,7 @@ async function routeToCRM(inst, digits, payload, pushName, lid, wasLid){
 
 const app=express();
 app.use(cors());
-app.use(express.json({ limit:'2mb' }));
+app.use(express.json({ limit:'15mb' }));
 const auth=(req,res,next)=> req.headers['x-token']===TOKEN ? next() : res.status(401).json({ok:false,error:'No autorizado'});
 const waOf=req=>{ const v=parseInt(req.query.wa||(req.body&&req.body.wa)||'1',10); return INST[v]||INST[1]; };
 
@@ -150,6 +151,19 @@ app.post('/send', auth, async (req,res)=>{
     const inst=waOf(req); const { to, text }=req.body;
     if (inst.status!=='connected') return res.json({ ok:false, error:'WhatsApp '+inst.id+' no conectado. Escanea su QR.' });
     await inst.sock.sendMessage(String(to).replace(/\D/g,'')+'@s.whatsapp.net', { text });
+    res.json({ ok:true });
+  }catch(e){ res.status(500).json({ ok:false, error:String(e.message||e) }); }
+});
+
+app.post('/sendMedia', auth, async (req,res)=>{
+  try{
+    const inst=waOf(req); const { to, mime, data, fileName, caption }=req.body;
+    if (inst.status!=='connected') return res.json({ ok:false, error:'WhatsApp '+inst.id+' no conectado. Escanea su QR.' });
+    const buf=Buffer.from((data||'').split(',')[1]||'', 'base64');
+    const jid=String(to).replace(/\D/g,'')+'@s.whatsapp.net';
+    if ((mime||'').startsWith('image/')) await inst.sock.sendMessage(jid, { image: buf, caption: caption||'' });
+    else if ((mime||'').startsWith('audio/')) await inst.sock.sendMessage(jid, { audio: buf, mimetype: mime });
+    else await inst.sock.sendMessage(jid, { document: buf, mimetype: mime||'application/octet-stream', fileName: fileName||'archivo', caption: caption||'' });
     res.json({ ok:true });
   }catch(e){ res.status(500).json({ ok:false, error:String(e.message||e) }); }
 });
