@@ -16,7 +16,7 @@ const jidDigits = j => (j||'').split('@')[0].split(':')[0].replace(/\D/g,'');
 admin.initializeApp({ credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)) });
 const db = admin.firestore();
 
-function mkInst(id){ return { id, sock:null, qr:null, status:'disconnected', connecting:false, dir:'./session'+id }; }
+function mkInst(id){ return { id, sock:null, qr:null, status:'disconnected', connecting:false, dir:'./session'+id, presence:{} }; }
 const INST = { 1: mkInst(1), 2: mkInst(2) };
 
 async function storeMedia(cid, buf, mime, fileName){
@@ -49,13 +49,10 @@ async function connect(inst){
         }
       }catch(e){ console.error('[conn]', e.message); }
     });
-    inst.presence={};
     inst.sock.ev.on('presence.update', ({ id, presences })=>{ try{ for(const p of Object.values(presences||{})){ if(p?.lastKnownPresence==='composing') inst.presence[id]={ts:Date.now()}; } }catch(e){} });
-    /* ✔️ Checks de entregado/visto en tiempo real */
     inst.sock.ev.on('messages.update', async (updates)=>{
       try{ for(const u of updates){ const st=u.update?.status; if(!u.key?.fromMe||!st||st<3) continue;
-        console.log('✔️ receipt WA'+inst.id, u.key.id, st);
-        await routeReceipt(inst, jidDigits(u.key.remoteJid), u.key.id, st); } }catch(e){ console.error('[rc]', e.message); }
+        await routeReceipt(inst, jidDigits(u.key.remoteJid), u.key.id, st); } }catch(e){}
     });
     inst.sock.ev.on('messages.upsert', async ({ messages, type }) => {
       try{
@@ -63,11 +60,11 @@ async function connect(inst){
         for (const m of messages){
           try{
             if (m.key.fromMe) continue;
-            if ((m.key.remoteJid||'').endsWith('@broadcast')) continue;
-            console.log('📥 upsert WA'+inst.id+':', m.key.remoteJid, m.pushName||'');
-            const payload = { from:'in', ts:Date.now() };
-            const im=m.message?.imageMessage, au=m.message?.audioMessage, doc=m.message?.documentMessage, vi=m.message?.videoMessage, stk=m.message?.stickerMessage, rea=m.message?.reactionMessage;
-            payload.wamid=m.key.id;
+            const rj = m.key.remoteJid||'';
+            if (rj.endsWith('@broadcast') || rj.endsWith('@g.us')) continue;   /* 🚫 Estados y GRUPOS */
+            console.log('📥 upsert WA'+inst.id+':', rj, m.pushName||'');
+            const payload = { from:'in', ts:Date.now(), wamid:m.key.id };
+            const im=m.message?.imageMessage, au=m.message?.audioMessage, doc=m.message?.documentMessage, vi=m.message?.videoMessage, stk=m.message?.stickerMessage, rea=m.message?.reactionMessage, loc=m.message?.locationMessage||m.message?.liveLocationMessage;
             if (im||au||doc||vi||stk){
               try{
                 const buf=await downloadMediaMessage(m);
@@ -83,11 +80,12 @@ async function connect(inst){
                 if (!inlined && buf){ payload._buf=buf; payload._mime=mime; }
               }catch(e){ payload.text='📎 Adjunto no descargable'; }
             } else if (rea){ payload.text='❤️ Reacción: '+(rea.text||''); }
+            else if (loc){ payload.text='📍 Ubicación: https://maps.google.com/?q='+(loc.degrees||0)+','+(loc.minutes||0); }
             else { const text=m.message?.conversation||m.message?.extendedTextMessage?.text; if(!text) continue; payload.text=text; }
-            let jidRaw = m.key.remoteJid||''; const wasLid = jidRaw.endsWith('@lid'); const lid = wasLid ? jidRaw : '';
+            let jidRaw = rj; const wasLid = rj.endsWith('@lid'); const lid = wasLid ? rj : '';
             if (lid || jidDigits(jidRaw).length>15){ try{ const pn = await inst.sock.signalRepository.lidMapping.getPNForLID(jidRaw); if(pn) jidRaw = pn; }catch(e){} }
             let push = m.pushName;
-            if (!push){ try{ push = (inst.sock.store?.contacts?.[m.key.remoteJid]?.name) || (inst.sock.chats?.[m.key.remoteJid]?.name) || ''; }catch(e){} }
+            if (!push){ try{ push = (inst.sock.store?.contacts?.[rj]?.name) || (inst.sock.chats?.[rj]?.name) || ''; }catch(e){} }
             await routeToCRM(inst, jidDigits(jidRaw), payload, push, lid, wasLid);
           }catch(e){ console.error('[msg]', e.message); }
         }
@@ -117,13 +115,13 @@ async function routeToCRM(inst, digits, payload, pushName, lid, wasLid){
     if (c && lid && c.id){ try{ const cur=await db.collection('clients').doc(c.id).get(); if(cur.exists && !cur.data().lid) await cur.ref.update({lid}); }catch(e){} }
     if (!c){
       const ws=await getWaSettings(); const set=(ws&&ws[inst.id])||{};
-      const data={ nombre:pushName||('+'+(digits||'desconocido')), telefono:(!wasLid&&digits&&digits.length>=10&&digits.length<=15)?digits:'', pipeline:set.pipelineInbound||'Sin Contactos', stage:'Nuevo lead', origen:'WhatsApp', waInst:Number(inst.id), unread:1, lastMsgTs:payload.ts||Date.now(), createdAt:Date.now() };
+      const data={ nombre:pushName||('+'+(digits||'desconocido')), telefono:(!wasLid&&digits&&digits.length>=10&&digits.length<=15)?digits:'', pipeline:set.pipelineInbound||'Sin Contactos', stage:'Nuevo lead', origen:'WhatsApp', waInst:Number(inst.id), unread:1, hasChat:true, lastMsgTs:payload.ts||Date.now(), createdAt:Date.now() };
       if (lid) data.lid=lid;
       const ref=await db.collection('clients').add(data); c={ id:ref.id };
     }
     if (payload._buf){ try{ payload.att=await storeMedia(c.id,payload._buf,payload._mime||'application/octet-stream',payload.fileName||'archivo'); }catch(e){ payload.text=payload.text||'📎 Adjunto no almacenado'; } delete payload._buf; delete payload._mime; }
     await db.collection('clients').doc(c.id).collection('whatsapp').add(payload);
-    await db.collection('clients').doc(c.id).update({ unread: admin.firestore.FieldValue.increment(1), lastMsgTs: payload.ts||Date.now() });
+    await db.collection('clients').doc(c.id).update({ unread: admin.firestore.FieldValue.increment(1), lastMsgTs: payload.ts||Date.now(), hasChat:true });
     console.log('📥 ruteado WA'+inst.id+' →', c.id);
   }catch(e){ console.error('route:', e.message); }
 }
@@ -135,7 +133,7 @@ async function routeReceipt(inst, digits, wamid, st){
     if(!c) return;
     const q=await db.collection('clients').doc(c.id).collection('whatsapp').where('wamid','==',wamid).get();
     for(const d of q.docs) await d.ref.update({ rc: st });
-  }catch(e){ console.error('rc:', e.message); }
+  }catch(e){}
 }
 
 const app=express();
@@ -144,16 +142,18 @@ app.use(express.json({ limit:'15mb' }));
 const auth=(req,res,next)=> req.headers['x-token']===TOKEN ? next() : res.status(401).json({ok:false,error:'No autorizado'});
 const waOf=req=>{ const v=parseInt(req.query.wa||(req.body&&req.body.wa)||'1',10); return INST[v]||INST[1]; };
 
-app.get('/', (req,res)=> res.send('CRM Nexus WhatsApp Bridge v12 ✅'));
+app.get('/', (req,res)=> res.send('CRM Nexus WhatsApp Bridge v13 ✅'));
 app.get('/health', (req,res)=> res.json({ ok:true, wa1:INST[1].status, wa2:INST[2].status }));
 app.get('/qr', auth, (req,res)=>{ const inst=waOf(req); res.json({ ok:true, status:inst.status, qr:inst.qr }); });
+app.get('/presence', auth, (req,res)=>{ const inst=waOf(req); const now=Date.now(); const out={};
+  for(const [jid,v] of Object.entries(inst.presence||{})){ if(now-(v.ts||0)<6000) out[jid]=true; }
+  res.json({ ok:true, presence:out }); });
 app.get('/chats', auth, (req,res)=>{
   const inst=waOf(req);
   if (inst.status!=='connected') return res.json({ ok:false, error:'No conectado' });
   const seen={}, list=[];
-  for (const c of Object.values(inst.sock.chats||{})){ const d=jidDigits(c.id); if(!d||d.length<10||d.length>15||seen[d]) continue; seen[d]=1; list.push({jid:d,name:c.name||('+'+d)}); }
-  res.json({ ok:true, chats:list });
-});
+  for (const c of Object.values(inst.sock.chats||{})){ const d=jidDigits(c.id); if(!d||d.length<10||d.length>15||seen[d]||c.id.endsWith('@g.us')) continue; seen[d]=1; list.push({jid:d,name:c.name||('+'+d)}); }
+  res.json({ ok:true, chats:list }); });
 app.post('/send', auth, async (req,res)=>{
   try{
     const inst=waOf(req); const { to, text }=req.body;
@@ -175,20 +175,24 @@ app.post('/sendMedia', auth, async (req,res)=>{
     res.json({ ok:true, wamid:r?.key?.id });
   }catch(e){ res.status(500).json({ ok:false, error:String(e.message||e) }); }
 });
-
 app.post('/react', auth, async (req,res)=>{
   try{
-    const inst=waOf(req); const { to, wamid, emoji }=req.body;
+    const inst=waOf(req); const { to, wamid, emoji, fromMe }=req.body;
     if (inst.status!=='connected') return res.json({ ok:false, error:'No conectado' });
     const jid=String(to).replace(/\D/g,'')+'@s.whatsapp.net';
-    await inst.sock.sendMessage(jid, { react: { text: emoji||'', key: { id: wamid, fromMe: false, remoteJid: jid } } });
+    await inst.sock.sendMessage(jid, { react: { text: emoji||'', key: { id: wamid, fromMe: !!fromMe, remoteJid: jid } } });
     res.json({ ok:true });
   }catch(e){ res.status(500).json({ ok:false, error:String(e.message||e) }); }
 });
-
-app.get('/presence', auth, (req,res)=>{ const inst=waOf(req); const now=Date.now(); const out={};
-  for(const [jid,v] of Object.entries(inst.presence||{})){ if(now-(v.ts||0)<6000) out[jid]=true; }
-  res.json({ ok:true, presence:out }); });
+app.post('/edit', auth, async (req,res)=>{
+  try{
+    const inst=waOf(req); const { to, wamid, text }=req.body;
+    if (inst.status!=='connected') return res.json({ ok:false, error:'No conectado' });
+    const jid=String(to).replace(/\D/g,'')+'@s.whatsapp.net';
+    await inst.sock.sendMessage(jid, { text: text||'', edit: { id: wamid, fromMe: true, remoteJid: jid } });
+    res.json({ ok:true });
+  }catch(e){ res.status(500).json({ ok:false, error:String(e.message||e) }); }
+});
 
 app.listen(PORT, ()=>{ console.log('Bridge listo en puerto', PORT); connect(INST[1]); connect(INST[2]); });
 setInterval(async ()=>{ for(const inst of [INST[1],INST[2]]){ if(inst.status==='connected'){ try{ await inst.sock.sendPresenceUpdate('available'); }catch(e){ console.log('♻️ reconectando WA'+inst.id); inst.status='disconnected'; inst.connecting=false; connect(inst); } } } }, 120000);
