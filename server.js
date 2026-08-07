@@ -81,7 +81,9 @@ async function connect(inst){
             } else { const text=m.message?.conversation||m.message?.extendedTextMessage?.text; if(!text) continue; payload.text=text; }
             let jidRaw = m.key.remoteJid||''; const wasLid = jidRaw.endsWith('@lid'); const lid = wasLid ? jidRaw : '';
             if (lid || jidDigits(jidRaw).length>15){ try{ const pn = await inst.sock.signalRepository.lidMapping.getPNForLID(jidRaw); if(pn) jidRaw = pn; }catch(e){} }
-            await routeToCRM(inst, jidDigits(jidRaw), payload, m.pushName, lid, wasLid);
+            let push = m.pushName;
+            if (!push){ try{ push = (inst.sock.store?.contacts?.[m.key.remoteJid]?.name) || (inst.sock.chats?.[m.key.remoteJid]?.name) || ''; }catch(e){} }
+            await routeToCRM(inst, jidDigits(jidRaw), payload, push, lid, wasLid);
           }catch(e){ console.error('[msg]', e.message); }
         }
       }catch(e){ console.error('[upsert]', e.message); }
@@ -100,13 +102,14 @@ async function matchClient(snap, inst, digits, lid, pushName){
     c=snap.docs.find(d=>(d.data().telefono||'').replace(/\D/g,'')===digits && (d.data().waInst||1)===Number(inst.id));
     if(!c) c=snap.docs.find(d=>{ const t=(d.data().telefono||'').replace(/\D/g,''); return t.length>=7 && (digits.endsWith(t)||t.endsWith(digits)); });
   }
-  if (!c && pushName) c=snap.docs.find(d=>(d.data().nombre||'')===pushName && (d.data().waInst||1)===Number(inst.id));
+  if (!c && pushName) c=snap.docs.find(d=>String(d.data().nombre||'').trim().toLowerCase()===String(pushName).trim().toLowerCase() && (d.data().waInst||1)===Number(inst.id));
   return c;
 }
 async function routeToCRM(inst, digits, payload, pushName, lid, wasLid){
   try{
     const snap=await db.collection('clients').get();
     let c=await matchClient(snap, inst, digits, lid, pushName);
+    if (c && lid && c.id){ try{ const cur=await db.collection('clients').doc(c.id).get(); if(cur.exists && !cur.data().lid) await cur.ref.update({lid}); }catch(e){} }
     if (!c){
       const ws=await getWaSettings(); const set=(ws&&ws[inst.id])||{};
       const data={ nombre:pushName||('+'+(digits||'desconocido')), telefono:(!wasLid&&digits&&digits.length>=10&&digits.length<=15)?digits:'', pipeline:set.pipelineInbound||'Sin Contactos', stage:'Nuevo lead', origen:'WhatsApp', waInst:Number(inst.id), unread:1, lastMsgTs:payload.ts||Date.now(), createdAt:Date.now() };
