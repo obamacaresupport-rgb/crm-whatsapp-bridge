@@ -18,6 +18,7 @@ const db = admin.firestore();
 
 function mkInst(id){ return { id, sock:null, qr:null, status:'disconnected', connecting:false, dir:'./session'+id, presence:{} }; }
 const INST = { 1: mkInst(1), 2: mkInst(2) };
+function reconnect(inst){ console.log('♻️ reconectando WA'+inst.id); inst.status='disconnected'; inst.connecting=false; connect(inst); }
 
 async function storeMedia(cid, buf, mime, fileName){
   const b64 = buf.toString('base64'); const CHUNK = 700*1024;
@@ -61,7 +62,7 @@ async function connect(inst){
           try{
             if (m.key.fromMe) continue;
             const rj = m.key.remoteJid||'';
-            if (rj.endsWith('@broadcast') || rj.endsWith('@g.us')) continue;   /* 🚫 Estados y GRUPOS */
+            if (rj.endsWith('@broadcast') || rj.endsWith('@g.us')) continue;
             console.log('📥 upsert WA'+inst.id+':', rj, m.pushName||'');
             const payload = { from:'in', ts:Date.now(), wamid:m.key.id };
             const im=m.message?.imageMessage, au=m.message?.audioMessage, doc=m.message?.documentMessage, vi=m.message?.videoMessage, stk=m.message?.stickerMessage, rea=m.message?.reactionMessage, loc=m.message?.locationMessage||m.message?.liveLocationMessage;
@@ -78,7 +79,7 @@ async function connect(inst){
                     for (const [w,q] of [[1024,0.7],[800,0.55],[640,0.4]]){ img.resize(w,Jimp.AUTO); const out=await img.getBufferAsync(Jimp.MIME_JPEG); if(out.length<=650*1024){ payload.url='data:image/jpeg;base64,'+out.toString('base64'); inlined=true; break; } } }catch(e){}
                 } else if (buf && (stk||au||vi) && buf.length<=650*1024){ payload.url='data:'+mime+';base64,'+buf.toString('base64'); inlined=true; }
                 if (!inlined && buf){ payload._buf=buf; payload._mime=mime; }
-              }catch(e){ payload.text='📎 Adjunto no descargable'; }
+              }catch(e){ console.error('media:',e.message); payload.text='📎 Adjunto no descargable'; }
             } else if (rea){ payload.text='❤️ Reacción: '+(rea.text||''); }
             else if (loc){ payload.text='📍 Ubicación: https://maps.google.com/?q='+(loc.degrees||0)+','+(loc.minutes||0); }
             else { const text=m.message?.conversation||m.message?.extendedTextMessage?.text; if(!text) continue; payload.text=text; }
@@ -142,7 +143,7 @@ app.use(express.json({ limit:'15mb' }));
 const auth=(req,res,next)=> req.headers['x-token']===TOKEN ? next() : res.status(401).json({ok:false,error:'No autorizado'});
 const waOf=req=>{ const v=parseInt(req.query.wa||(req.body&&req.body.wa)||'1',10); return INST[v]||INST[1]; };
 
-app.get('/', (req,res)=> res.send('CRM Nexus WhatsApp Bridge v13 ✅'));
+app.get('/', (req,res)=> res.send('CRM Nexus WhatsApp Bridge v14 ✅'));
 app.get('/health', (req,res)=> res.json({ ok:true, wa1:INST[1].status, wa2:INST[2].status }));
 app.get('/qr', auth, (req,res)=>{ const inst=waOf(req); res.json({ ok:true, status:inst.status, qr:inst.qr }); });
 app.get('/presence', auth, (req,res)=>{ const inst=waOf(req); const now=Date.now(); const out={};
@@ -159,8 +160,9 @@ app.post('/send', auth, async (req,res)=>{
     const inst=waOf(req); const { to, text }=req.body;
     if (inst.status!=='connected') return res.json({ ok:false, error:'WhatsApp '+inst.id+' no conectado.' });
     const r=await inst.sock.sendMessage(String(to).replace(/\D/g,'')+'@s.whatsapp.net', { text });
+    console.log('📨 send WA'+inst.id+' ok');
     res.json({ ok:true, wamid:r?.key?.id });
-  }catch(e){ res.status(500).json({ ok:false, error:String(e.message||e) }); }
+  }catch(e){ try{ reconnect(waOf(req)); }catch(_){} res.status(500).json({ ok:false, error:String(e.message||e) }); }
 });
 app.post('/sendMedia', auth, async (req,res)=>{
   try{
@@ -170,10 +172,14 @@ app.post('/sendMedia', auth, async (req,res)=>{
     const jid=String(to).replace(/\D/g,'')+'@s.whatsapp.net';
     let r;
     if ((mime||'').startsWith('image/')) r=await inst.sock.sendMessage(jid, { image: buf, caption: caption||undefined });
-    else if ((mime||'').startsWith('audio/')) r=await inst.sock.sendMessage(jid, { audio: buf, mimetype: mime });
+    else if ((mime||'').startsWith('audio/')){
+      try{ r=await inst.sock.sendMessage(jid, { audio: buf, mimetype:'audio/ogg; codecs=opus' }); }
+      catch(e){ r=await inst.sock.sendMessage(jid, { document: buf, mimetype:'audio/mpeg', fileName: fileName||'audio.ogg' }); }
+    }
     else r=await inst.sock.sendMessage(jid, { document: buf, mimetype: mime||'application/octet-stream', fileName: fileName||'archivo', caption: caption||undefined });
+    console.log('📨 sendMedia WA'+inst.id+' ok');
     res.json({ ok:true, wamid:r?.key?.id });
-  }catch(e){ res.status(500).json({ ok:false, error:String(e.message||e) }); }
+  }catch(e){ try{ reconnect(waOf(req)); }catch(_){} res.status(500).json({ ok:false, error:String(e.message||e) }); }
 });
 app.post('/react', auth, async (req,res)=>{
   try{
@@ -195,4 +201,4 @@ app.post('/edit', auth, async (req,res)=>{
 });
 
 app.listen(PORT, ()=>{ console.log('Bridge listo en puerto', PORT); connect(INST[1]); connect(INST[2]); });
-setInterval(async ()=>{ for(const inst of [INST[1],INST[2]]){ if(inst.status==='connected'){ try{ await inst.sock.sendPresenceUpdate('available'); }catch(e){ console.log('♻️ reconectando WA'+inst.id); inst.status='disconnected'; inst.connecting=false; connect(inst); } } } }, 120000);
+setInterval(async ()=>{ for(const inst of [INST[1],INST[2]]){ if(inst.status==='connected'){ try{ await inst.sock.sendPresenceUpdate('available'); }catch(e){ reconnect(inst); } } } }, 60000);
