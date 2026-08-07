@@ -63,22 +63,24 @@ async function connect(inst){
             if (m.key.fromMe) continue;
             console.log('📥 upsert WA'+inst.id+':', m.key.remoteJid, m.pushName||'');
             const payload = { from:'in', ts:Date.now() };
-            const im=m.message?.imageMessage, au=m.message?.audioMessage, doc=m.message?.documentMessage;
-            if (im||au||doc){
+            const im=m.message?.imageMessage, au=m.message?.audioMessage, doc=m.message?.documentMessage, vi=m.message?.videoMessage, stk=m.message?.stickerMessage, rea=m.message?.reactionMessage;
+            payload.wamid=m.key.id;
+            if (im||au||doc||vi||stk){
               try{
                 const buf=await downloadMediaMessage(m);
-                const mime=im?.mimetype||au?.mimetype||doc?.mimetype||'application/octet-stream';
-                payload.type=im?'image':(au?'audio':'file');
-                payload.fileName=doc?.fileName||(au?'audio.ogg':(im?'imagen.jpg':'archivo'));
-                payload.size=buf?buf.length:0; payload.text=im?.caption||(doc?doc.fileName:'');
+                const mime=im?.mimetype||au?.mimetype||doc?.mimetype||vi?.mimetype||stk?.mimetype||'application/octet-stream';
+                payload.type=im?'image':(au?'audio':(vi?'video':(stk?'image':'file')));
+                payload.fileName=doc?.fileName||(au?'audio.ogg':(im?'imagen.jpg':(vi?'video.mp4':(stk?'sticker.webp':'archivo'))));
+                payload.size=buf?buf.length:0; payload.text=im?.caption||vi?.caption||(doc?doc.fileName:'');
                 let inlined=false;
                 if (buf && im){
                   try{ const img=await Jimp.read(buf);
                     for (const [w,q] of [[1024,0.7],[800,0.55],[640,0.4]]){ img.resize(w,Jimp.AUTO); const out=await img.getBufferAsync(Jimp.MIME_JPEG); if(out.length<=650*1024){ payload.url='data:image/jpeg;base64,'+out.toString('base64'); inlined=true; break; } } }catch(e){}
-                } else if (buf && buf.length<=650*1024){ payload.url='data:'+mime+';base64,'+buf.toString('base64'); inlined=true; }
+                } else if (buf && (stk||au||vi) && buf.length<=650*1024){ payload.url='data:'+mime+';base64,'+buf.toString('base64'); inlined=true; }
                 if (!inlined && buf){ payload._buf=buf; payload._mime=mime; }
               }catch(e){ payload.text='📎 Adjunto no descargable'; }
-            } else { const text=m.message?.conversation||m.message?.extendedTextMessage?.text; if(!text) continue; payload.text=text; }
+            } else if (rea){ payload.text='❤️ Reacción: '+(rea.text||''); }
+            else { const text=m.message?.conversation||m.message?.extendedTextMessage?.text; if(!text) continue; payload.text=text; }
             let jidRaw = m.key.remoteJid||''; const wasLid = jidRaw.endsWith('@lid'); const lid = wasLid ? jidRaw : '';
             if (lid || jidDigits(jidRaw).length>15){ try{ const pn = await inst.sock.signalRepository.lidMapping.getPNForLID(jidRaw); if(pn) jidRaw = pn; }catch(e){} }
             let push = m.pushName;
@@ -168,6 +170,16 @@ app.post('/sendMedia', auth, async (req,res)=>{
     else if ((mime||'').startsWith('audio/')) r=await inst.sock.sendMessage(jid, { audio: buf, mimetype: mime });
     else r=await inst.sock.sendMessage(jid, { document: buf, mimetype: mime||'application/octet-stream', fileName: fileName||'archivo', caption: caption||undefined });
     res.json({ ok:true, wamid:r?.key?.id });
+  }catch(e){ res.status(500).json({ ok:false, error:String(e.message||e) }); }
+});
+
+app.post('/react', auth, async (req,res)=>{
+  try{
+    const inst=waOf(req); const { to, wamid, emoji }=req.body;
+    if (inst.status!=='connected') return res.json({ ok:false, error:'No conectado' });
+    const jid=String(to).replace(/\D/g,'')+'@s.whatsapp.net';
+    await inst.sock.sendMessage(jid, { react: { text: emoji||'', key: { id: wamid, fromMe: false, remoteJid: jid } } });
+    res.json({ ok:true });
   }catch(e){ res.status(500).json({ ok:false, error:String(e.message||e) }); }
 });
 
