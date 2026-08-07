@@ -16,9 +16,10 @@ const jidDigits = j => (j||'').split('@')[0].split(':')[0].replace(/\D/g,'');
 admin.initializeApp({ credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)) });
 const db = admin.firestore();
 
-function mkInst(id){ return { id, sock:null, qr:null, status:'disconnected', connecting:false, dir:'./session'+id, presence:{} }; }
+const DBG=[]; function log(...a){ const s=a.map(x=>(x&&typeof x==='object')?JSON.stringify(x):String(x)).join(' '); DBG.push(s); if(DBG.length>300) DBG.shift(); console.log(s); }
+function mkInst(id){ return { id, sock:null, qr:null, status:'disconnected', connecting:false, dir:'./session'+id, presence:{}, lastEvent:0, lastSend:0 }; }
 const INST = { 1: mkInst(1), 2: mkInst(2) };
-function reconnect(inst){ console.log('♻️ reconectando WA'+inst.id); inst.status='disconnected'; inst.connecting=false; connect(inst); }
+function reconnect(inst){ log('♻️ reconectando WA'+inst.id); inst.status='disconnected'; inst.connecting=false; connect(inst); }
 
 async function storeMedia(cid, buf, mime, fileName){
   const b64 = buf.toString('base64'); const CHUNK = 700*1024;
@@ -41,14 +42,14 @@ async function connect(inst){
     inst.sock.ev.on('connection.update', u => {
       try{
         if (u.qr){ inst.qr = u.qr; inst.status = 'waiting'; }
-        if (u.connection === 'open'){ inst.status = 'connected'; inst.qr = null; console.log('✅ WA'+inst.id+' SESIÓN ABIERTA'); }
+        if (u.connection === 'open'){ inst.status = 'connected'; inst.qr = null; inst.lastEvent=Date.now(); log('✅ WA'+inst.id+' SESIÓN ABIERTA'); }
         if (u.connection === 'close'){
           inst.status = 'disconnected';
           const code = new Boom(u.lastDisconnect?.error)?.output?.statusCode;
           if (code === DisconnectReason.loggedOut){ try{ fs.rmSync(inst.dir,{recursive:true,force:true}); }catch(e){} }
           setTimeout(()=>{ inst.connecting=false; connect(inst); }, 3000);
         }
-      }catch(e){ console.error('[conn]', e.message); }
+      }catch(e){ log('[conn]', e.message); }
     });
     inst.sock.ev.on('presence.update', ({ id, presences })=>{ try{ for(const p of Object.values(presences||{})){ if(p?.lastKnownPresence==='composing') inst.presence[id]={ts:Date.now()}; } }catch(e){} });
     inst.sock.ev.on('messages.update', async (updates)=>{
@@ -57,13 +58,15 @@ async function connect(inst){
     });
     inst.sock.ev.on('messages.upsert', async ({ messages, type }) => {
       try{
+        inst.lastEvent=Date.now();
+        log('📥 upsert WA'+inst.id+' type='+type+' n='+messages.length);
         if (type !== 'notify') return;
         for (const m of messages){
           try{
             if (m.key.fromMe) continue;
             const rj = m.key.remoteJid||'';
             if (rj.endsWith('@broadcast') || rj.endsWith('@g.us')) continue;
-            console.log('📥 upsert WA'+inst.id+':', rj, m.pushName||'');
+            log('📥 msg WA'+inst.id+':', rj, m.pushName||'');
             const payload = { from:'in', ts:Date.now(), wamid:m.key.id };
             const im=m.message?.imageMessage, au=m.message?.audioMessage, doc=m.message?.documentMessage, vi=m.message?.videoMessage, stk=m.message?.stickerMessage, rea=m.message?.reactionMessage, loc=m.message?.locationMessage||m.message?.liveLocationMessage;
             if (im||au||doc||vi||stk){
@@ -79,7 +82,7 @@ async function connect(inst){
                     for (const [w,q] of [[1024,0.7],[800,0.55],[640,0.4]]){ img.resize(w,Jimp.AUTO); const out=await img.getBufferAsync(Jimp.MIME_JPEG); if(out.length<=650*1024){ payload.url='data:image/jpeg;base64,'+out.toString('base64'); inlined=true; break; } } }catch(e){}
                 } else if (buf && (stk||au||vi) && buf.length<=650*1024){ payload.url='data:'+mime+';base64,'+buf.toString('base64'); inlined=true; }
                 if (!inlined && buf){ payload._buf=buf; payload._mime=mime; }
-              }catch(e){ console.error('media:',e.message); payload.text='📎 Adjunto no descargable'; }
+              }catch(e){ log('media:',e.message); payload.text='📎 Adjunto no descargable'; }
             } else if (rea){ payload.text='❤️ Reacción: '+(rea.text||''); }
             else if (loc){ payload.text='📍 Ubicación: https://maps.google.com/?q='+(loc.degrees||0)+','+(loc.minutes||0); }
             else { const text=m.message?.conversation||m.message?.extendedTextMessage?.text; if(!text) continue; payload.text=text; }
@@ -88,11 +91,11 @@ async function connect(inst){
             let push = m.pushName;
             if (!push){ try{ push = (inst.sock.store?.contacts?.[rj]?.name) || (inst.sock.chats?.[rj]?.name) || ''; }catch(e){} }
             await routeToCRM(inst, jidDigits(jidRaw), payload, push, lid, wasLid);
-          }catch(e){ console.error('[msg]', e.message); }
+          }catch(e){ log('[msg]', e.message); }
         }
-      }catch(e){ console.error('[upsert]', e.message); }
+      }catch(e){ log('[upsert]', e.message); }
     });
-  }catch(e){ console.error('[connect]', e.message); setTimeout(()=>{ inst.connecting=false; connect(inst); }, 5000); }
+  }catch(e){ log('[connect]', e.message); setTimeout(()=>{ inst.connecting=false; connect(inst); }, 5000); }
   inst.connecting = false;
 }
 
@@ -123,8 +126,8 @@ async function routeToCRM(inst, digits, payload, pushName, lid, wasLid){
     if (payload._buf){ try{ payload.att=await storeMedia(c.id,payload._buf,payload._mime||'application/octet-stream',payload.fileName||'archivo'); }catch(e){ payload.text=payload.text||'📎 Adjunto no almacenado'; } delete payload._buf; delete payload._mime; }
     await db.collection('clients').doc(c.id).collection('whatsapp').add(payload);
     await db.collection('clients').doc(c.id).update({ unread: admin.firestore.FieldValue.increment(1), lastMsgTs: payload.ts||Date.now(), hasChat:true });
-    console.log('📥 ruteado WA'+inst.id+' →', c.id);
-  }catch(e){ console.error('route:', e.message); }
+    log('📥 ruteado WA'+inst.id+' →', c.id);
+  }catch(e){ log('route:', e.message); }
 }
 async function routeReceipt(inst, digits, wamid, st){
   try{
@@ -143,8 +146,9 @@ app.use(express.json({ limit:'15mb' }));
 const auth=(req,res,next)=> req.headers['x-token']===TOKEN ? next() : res.status(401).json({ok:false,error:'No autorizado'});
 const waOf=req=>{ const v=parseInt(req.query.wa||(req.body&&req.body.wa)||'1',10); return INST[v]||INST[1]; };
 
-app.get('/', (req,res)=> res.send('CRM Nexus WhatsApp Bridge v14 ✅'));
+app.get('/', (req,res)=> res.send('CRM Nexus WhatsApp Bridge v15 ✅'));
 app.get('/health', (req,res)=> res.json({ ok:true, wa1:INST[1].status, wa2:INST[2].status }));
+app.get('/dbg', (req,res)=> res.json({ ok:true, wa1:INST[1].status, wa2:INST[2].status, lastEvent1:INST[1].lastEvent, lastSend1:INST[1].lastSend, last: DBG.slice(-60) }));
 app.get('/qr', auth, (req,res)=>{ const inst=waOf(req); res.json({ ok:true, status:inst.status, qr:inst.qr }); });
 app.get('/presence', auth, (req,res)=>{ const inst=waOf(req); const now=Date.now(); const out={};
   for(const [jid,v] of Object.entries(inst.presence||{})){ if(now-(v.ts||0)<6000) out[jid]=true; }
@@ -160,7 +164,7 @@ app.post('/send', auth, async (req,res)=>{
     const inst=waOf(req); const { to, text }=req.body;
     if (inst.status!=='connected') return res.json({ ok:false, error:'WhatsApp '+inst.id+' no conectado.' });
     const r=await inst.sock.sendMessage(String(to).replace(/\D/g,'')+'@s.whatsapp.net', { text });
-    console.log('📨 send WA'+inst.id+' ok');
+    inst.lastSend=Date.now(); log('📨 send WA'+inst.id+' ok');
     res.json({ ok:true, wamid:r?.key?.id });
   }catch(e){ try{ reconnect(waOf(req)); }catch(_){} res.status(500).json({ ok:false, error:String(e.message||e) }); }
 });
@@ -177,7 +181,7 @@ app.post('/sendMedia', auth, async (req,res)=>{
       catch(e){ r=await inst.sock.sendMessage(jid, { document: buf, mimetype:'audio/mpeg', fileName: fileName||'audio.ogg' }); }
     }
     else r=await inst.sock.sendMessage(jid, { document: buf, mimetype: mime||'application/octet-stream', fileName: fileName||'archivo', caption: caption||undefined });
-    console.log('📨 sendMedia WA'+inst.id+' ok');
+    inst.lastSend=Date.now(); log('📨 sendMedia WA'+inst.id+' ok');
     res.json({ ok:true, wamid:r?.key?.id });
   }catch(e){ try{ reconnect(waOf(req)); }catch(_){} res.status(500).json({ ok:false, error:String(e.message||e) }); }
 });
@@ -200,5 +204,10 @@ app.post('/edit', auth, async (req,res)=>{
   }catch(e){ res.status(500).json({ ok:false, error:String(e.message||e) }); }
 });
 
-app.listen(PORT, ()=>{ console.log('Bridge listo en puerto', PORT); connect(INST[1]); connect(INST[2]); });
-setInterval(async ()=>{ for(const inst of [INST[1],INST[2]]){ if(inst.status==='connected'){ try{ await inst.sock.sendPresenceUpdate('available'); }catch(e){ reconnect(inst); } } } }, 60000);
+app.listen(PORT, ()=>{ log('Bridge listo en puerto', PORT); connect(INST[1]); connect(INST[2]); });
+setInterval(async ()=>{ for(const inst of [INST[1],INST[2]]){
+  if(inst.status==='connected'){
+    try{ await inst.sock.sendPresenceUpdate('available'); }catch(e){ reconnect(inst); continue; }
+    if(inst.lastSend && inst.lastSend>inst.lastEvent && Date.now()-inst.lastSend>10*60*1000){ log('⚠️ WA'+inst.id+' sin eventos tras envío → reconectando'); reconnect(inst); }
+  }
+} }, 60000);
