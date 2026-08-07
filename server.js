@@ -20,16 +20,14 @@ function mkInst(id){ return { id, sock:null, qr:null, status:'disconnected', con
 const INST = { 1: mkInst(1), 2: mkInst(2) };
 
 async function storeMedia(cid, buf, mime, fileName){
-  const b64 = buf.toString('base64');
-  const CHUNK = 700*1024;
+  const b64 = buf.toString('base64'); const CHUNK = 700*1024;
   const attId = Date.now()+'_'+Math.random().toString(36).slice(2,8);
   const parts = []; for(let i=0;i<b64.length;i+=CHUNK) parts.push(b64.slice(i,i+CHUNK));
   const batch = db.batch();
   const attRef = db.collection('clients').doc(cid).collection('attachments').doc(attId);
   batch.set(attRef,{mime,fileName,size:buf.length,n:parts.length,ts:Date.now()});
   parts.forEach((p,i)=>batch.set(attRef.collection('chunks').doc(String(i).padStart(4,'0')),{i,d:p}));
-  await batch.commit();
-  return attId;
+  await batch.commit(); return attId;
 }
 
 async function connect(inst){
@@ -51,13 +49,19 @@ async function connect(inst){
         }
       }catch(e){ console.error('[conn]', e.message); }
     });
+    /* ✔️ Checks de entregado/visto en tiempo real */
+    inst.sock.ev.on('messages.update', async (updates)=>{
+      try{ for(const u of updates){ const st=u.update?.status; if(!u.key?.fromMe||!st||st<3) continue;
+        console.log('✔️ receipt WA'+inst.id, u.key.id, st);
+        await routeReceipt(inst, jidDigits(u.key.remoteJid), u.key.id, st); } }catch(e){ console.error('[rc]', e.message); }
+    });
     inst.sock.ev.on('messages.upsert', async ({ messages, type }) => {
       try{
         if (type !== 'notify') return;
-        console.log('📥 upsert WA'+inst.id+':', m.key.remoteJid, m.pushName||'');
         for (const m of messages){
           try{
             if (m.key.fromMe) continue;
+            console.log('📥 upsert WA'+inst.id+':', m.key.remoteJid, m.pushName||'');
             const payload = { from:'in', ts:Date.now() };
             const im=m.message?.imageMessage, au=m.message?.audioMessage, doc=m.message?.documentMessage;
             if (im||au||doc){
@@ -66,31 +70,18 @@ async function connect(inst){
                 const mime=im?.mimetype||au?.mimetype||doc?.mimetype||'application/octet-stream';
                 payload.type=im?'image':(au?'audio':'file');
                 payload.fileName=doc?.fileName||(au?'audio.ogg':(im?'imagen.jpg':'archivo'));
-                payload.size=buf?buf.length:0;
-                payload.text=im?.caption||(doc?doc.fileName:'');
+                payload.size=buf?buf.length:0; payload.text=im?.caption||(doc?doc.fileName:'');
                 let inlined=false;
                 if (buf && im){
-                  try{
-                    const img=await Jimp.read(buf);
-                    for (const [w,q] of [[1024,0.7],[800,0.55],[640,0.4]]){
-                      img.resize(w,Jimp.AUTO);
-                      const out=await img.getBufferAsync(Jimp.MIME_JPEG);
-                      if (out.length<=650*1024){ payload.url='data:image/jpeg;base64,'+out.toString('base64'); inlined=true; break; }
-                    }
-                  }catch(e){ console.error('jimp:',e.message); }
-                } else if (buf && buf.length<=650*1024){
-                  payload.url='data:'+mime+';base64,'+buf.toString('base64'); inlined=true;
-                }
+                  try{ const img=await Jimp.read(buf);
+                    for (const [w,q] of [[1024,0.7],[800,0.55],[640,0.4]]){ img.resize(w,Jimp.AUTO); const out=await img.getBufferAsync(Jimp.MIME_JPEG); if(out.length<=650*1024){ payload.url='data:image/jpeg;base64,'+out.toString('base64'); inlined=true; break; } } }catch(e){}
+                } else if (buf && buf.length<=650*1024){ payload.url='data:'+mime+';base64,'+buf.toString('base64'); inlined=true; }
                 if (!inlined && buf){ payload._buf=buf; payload._mime=mime; }
               }catch(e){ payload.text='📎 Adjunto no descargable'; }
             } else { const text=m.message?.conversation||m.message?.extendedTextMessage?.text; if(!text) continue; payload.text=text; }
-            let jidRaw = m.key.remoteJid||'';
-            const wasLid = jidRaw.endsWith('@lid');
-            const lid = wasLid ? jidRaw : '';
-            if (lid || jidDigits(jidRaw).length>15){
-              try{ const pn = await inst.sock.signalRepository.lidMapping.getPNForLID(jidRaw); if(pn) jidRaw = pn; }catch(e){}
-            }
-              await routeToCRM(inst, jidDigits(jidRaw), payload, m.pushName, lid, wasLid);
+            let jidRaw = m.key.remoteJid||''; const wasLid = jidRaw.endsWith('@lid'); const lid = wasLid ? jidRaw : '';
+            if (lid || jidDigits(jidRaw).length>15){ try{ const pn = await inst.sock.signalRepository.lidMapping.getPNForLID(jidRaw); if(pn) jidRaw = pn; }catch(e){} }
+            await routeToCRM(inst, jidDigits(jidRaw), payload, m.pushName, lid, wasLid);
           }catch(e){ console.error('[msg]', e.message); }
         }
       }catch(e){ console.error('[upsert]', e.message); }
@@ -102,32 +93,41 @@ async function connect(inst){
 let waSettingsCache=null, waSettingsAt=0;
 async function getWaSettings(){ const now=Date.now(); if(waSettingsCache&&now-waSettingsAt<60000) return waSettingsCache; try{ const d=await db.collection('config').doc('waSettings').get(); waSettingsCache=d.exists?d.data():{}; }catch(e){ waSettingsCache={}; } waSettingsAt=now; return waSettingsCache; }
 
+async function matchClient(snap, inst, digits, lid, pushName){
+  let c=null;
+  if (lid) c=snap.docs.find(d=>(d.data().lid||'')!=='' && (d.data().lid||'')===lid && (d.data().waInst||1)===Number(inst.id));
+  if (!c && !lid && digits && digits.length>=10 && digits.length<=15){
+    c=snap.docs.find(d=>(d.data().telefono||'').replace(/\D/g,'')===digits && (d.data().waInst||1)===Number(inst.id));
+    if(!c) c=snap.docs.find(d=>{ const t=(d.data().telefono||'').replace(/\D/g,''); return t.length>=7 && (digits.endsWith(t)||t.endsWith(digits)); });
+  }
+  if (!c && pushName) c=snap.docs.find(d=>(d.data().nombre||'')===pushName && (d.data().waInst||1)===Number(inst.id));
+  return c;
+}
 async function routeToCRM(inst, digits, payload, pushName, lid, wasLid){
   try{
     const snap=await db.collection('clients').get();
-    let c=null;
-    if (lid) c=snap.docs.find(d=>(d.data().lid||'')!=='' && (d.data().lid||'')===lid && (d.data().waInst||1)===Number(inst.id));
-    if (!c && !wasLid && digits && digits.length>=10 && digits.length<=15){
-      c=snap.docs.find(d=>(d.data().telefono||'').replace(/\D/g,'')===digits && (d.data().waInst||1)===Number(inst.id));
-      if(!c) c=snap.docs.find(d=>{ const t=(d.data().telefono||'').replace(/\D/g,''); return t.length>=7 && (digits.endsWith(t)||t.endsWith(digits)); });
-    }
-    if (!c && pushName) c=snap.docs.find(d=>(d.data().nombre||'')===pushName && (d.data().waInst||1)===Number(inst.id));
+    let c=await matchClient(snap, inst, digits, lid, pushName);
     if (!c){
       const ws=await getWaSettings(); const set=(ws&&ws[inst.id])||{};
       const data={ nombre:pushName||('+'+(digits||'desconocido')), telefono:(!wasLid&&digits&&digits.length>=10&&digits.length<=15)?digits:'', pipeline:set.pipelineInbound||'Sin Contactos', stage:'Nuevo lead', origen:'WhatsApp', waInst:Number(inst.id), unread:1, lastMsgTs:payload.ts||Date.now(), createdAt:Date.now() };
       if (lid) data.lid=lid;
-      const ref=await db.collection('clients').add(data);
-      c={ id:ref.id };
+      const ref=await db.collection('clients').add(data); c={ id:ref.id };
     }
-    if (payload._buf){
-      try{ payload.att=await storeMedia(c.id,payload._buf,payload._mime||'application/octet-stream',payload.fileName||'archivo'); }
-      catch(e){ console.error('att:',e.message); payload.text=payload.text||'📎 Adjunto no almacenado'; }
-      delete payload._buf; delete payload._mime;
-    }
+    if (payload._buf){ try{ payload.att=await storeMedia(c.id,payload._buf,payload._mime||'application/octet-stream',payload.fileName||'archivo'); }catch(e){ payload.text=payload.text||'📎 Adjunto no almacenado'; } delete payload._buf; delete payload._mime; }
     await db.collection('clients').doc(c.id).collection('whatsapp').add(payload);
     await db.collection('clients').doc(c.id).update({ unread: admin.firestore.FieldValue.increment(1), lastMsgTs: payload.ts||Date.now() });
-    console.log('📥 Mensaje ruteado WA'+inst.id+' →', c.id);
+    console.log('📥 ruteado WA'+inst.id+' →', c.id);
   }catch(e){ console.error('route:', e.message); }
+}
+async function routeReceipt(inst, digits, wamid, st){
+  try{
+    if(!digits||!wamid) return;
+    const snap=await db.collection('clients').get();
+    const c=await matchClient(snap, inst, digits, '', '');
+    if(!c) return;
+    const q=await db.collection('clients').doc(c.id).collection('whatsapp').where('wamid','==',wamid).get();
+    for(const d of q.docs) await d.ref.update({ rc: st });
+  }catch(e){ console.error('rc:', e.message); }
 }
 
 const app=express();
@@ -136,7 +136,7 @@ app.use(express.json({ limit:'15mb' }));
 const auth=(req,res,next)=> req.headers['x-token']===TOKEN ? next() : res.status(401).json({ok:false,error:'No autorizado'});
 const waOf=req=>{ const v=parseInt(req.query.wa||(req.body&&req.body.wa)||'1',10); return INST[v]||INST[1]; };
 
-app.get('/', (req,res)=> res.send('CRM Nexus WhatsApp Bridge v9 ✅'));
+app.get('/', (req,res)=> res.send('CRM Nexus WhatsApp Bridge v12 ✅'));
 app.get('/health', (req,res)=> res.json({ ok:true, wa1:INST[1].status, wa2:INST[2].status }));
 app.get('/qr', auth, (req,res)=>{ const inst=waOf(req); res.json({ ok:true, status:inst.status, qr:inst.qr }); });
 app.get('/chats', auth, (req,res)=>{
@@ -149,22 +149,22 @@ app.get('/chats', auth, (req,res)=>{
 app.post('/send', auth, async (req,res)=>{
   try{
     const inst=waOf(req); const { to, text }=req.body;
-    if (inst.status!=='connected') return res.json({ ok:false, error:'WhatsApp '+inst.id+' no conectado. Escanea su QR.' });
-    await inst.sock.sendMessage(String(to).replace(/\D/g,'')+'@s.whatsapp.net', { text });
-    res.json({ ok:true });
+    if (inst.status!=='connected') return res.json({ ok:false, error:'WhatsApp '+inst.id+' no conectado.' });
+    const r=await inst.sock.sendMessage(String(to).replace(/\D/g,'')+'@s.whatsapp.net', { text });
+    res.json({ ok:true, wamid:r?.key?.id });
   }catch(e){ res.status(500).json({ ok:false, error:String(e.message||e) }); }
 });
-
 app.post('/sendMedia', auth, async (req,res)=>{
   try{
     const inst=waOf(req); const { to, mime, data, fileName, caption }=req.body;
-    if (inst.status!=='connected') return res.json({ ok:false, error:'WhatsApp '+inst.id+' no conectado. Escanea su QR.' });
+    if (inst.status!=='connected') return res.json({ ok:false, error:'WhatsApp '+inst.id+' no conectado.' });
     const buf=Buffer.from((data||'').split(',')[1]||'', 'base64');
     const jid=String(to).replace(/\D/g,'')+'@s.whatsapp.net';
-    if ((mime||'').startsWith('image/')) await inst.sock.sendMessage(jid, { image: buf, caption: caption||'' });
-    else if ((mime||'').startsWith('audio/')) await inst.sock.sendMessage(jid, { audio: buf, mimetype: mime });
-    else await inst.sock.sendMessage(jid, { document: buf, mimetype: mime||'application/octet-stream', fileName: fileName||'archivo', caption: caption||'' });
-    res.json({ ok:true });
+    let r;
+    if ((mime||'').startsWith('image/')) r=await inst.sock.sendMessage(jid, { image: buf, caption: caption||undefined });
+    else if ((mime||'').startsWith('audio/')) r=await inst.sock.sendMessage(jid, { audio: buf, mimetype: mime });
+    else r=await inst.sock.sendMessage(jid, { document: buf, mimetype: mime||'application/octet-stream', fileName: fileName||'archivo', caption: caption||undefined });
+    res.json({ ok:true, wamid:r?.key?.id });
   }catch(e){ res.status(500).json({ ok:false, error:String(e.message||e) }); }
 });
 
