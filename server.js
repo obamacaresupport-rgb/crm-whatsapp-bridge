@@ -23,7 +23,7 @@ const R2_BUCKET = process.env.R2_BUCKET || 'crm-nexus-media';
 const R2_PUBLIC = process.env.R2_PUBLIC || '';
 
 const DBG=[]; function log(...a){ const s=a.map(x=>(x&&typeof x==='object')?JSON.stringify(x):String(x)).join(' '); DBG.push(s); if(DBG.length>300) DBG.shift(); console.log(s); }
-function mkInst(id){ return { id, sock:null, qr:null, status:'disconnected', connecting:false, dir:'./session'+id, presence:{}, lastEvent:0, lastSend:0, pushT:null }; }
+function mkInst(id){ return { id, sock:null, qr:null, status:'disconnected', connecting:false, dir:'./session'+id, presence:{}, lastEvent:0, lastSend:0, pushT:null, own:'', sentIds:new Set() }; }
 const INST = { 1: mkInst(1), 2: mkInst(2) };
 function reconnect(inst){ log('♻️ reconectando WA'+inst.id); inst.status='disconnected'; inst.connecting=false; connect(inst); }
 
@@ -71,7 +71,7 @@ async function connect(inst){
     inst.sock.ev.on('connection.update', u => {
       try{
         if (u.qr){ inst.qr = u.qr; inst.status = 'waiting'; }
-        if (u.connection === 'open'){ inst.status = 'connected'; inst.qr = null; inst.lastEvent=Date.now(); schedulePush(inst); log('✅ WA'+inst.id+' SESIÓN ABIERTA'); }
+                if (u.connection === 'open'){ inst.status = 'connected'; inst.qr = null; inst.lastEvent=Date.now(); inst.own=jidDigits(inst.sock.user?.id||''); schedulePush(inst); log('✅ WA'+inst.id+' SESIÓN ABIERTA (número propio: '+inst.own+')'); }
         if (u.connection === 'close'){
           inst.status = 'disconnected';
           const code = new Boom(u.lastDisconnect?.error)?.output?.statusCode;
@@ -90,10 +90,14 @@ async function connect(inst){
         inst.lastEvent=Date.now();
         log('📥 upsert WA'+inst.id+' type='+type+' n='+messages.length);
         if (type !== 'notify') return;
-        for (const m of messages){
+                for (const m of messages){
           try{
-            if (m.key.fromMe) continue;
             const rj = m.key.remoteJid||'';
+            if (m.key.fromMe){
+              const isSelf = inst.own && jidDigits(rj)===inst.own && !rj.endsWith('@lid');
+              if (!isSelf || inst.sentIds.has(m.key.id)) continue;
+              log('🪞 mensaje propio WA'+inst.id);
+            }
             if (rj.endsWith('@broadcast') || rj.endsWith('@g.us')) continue;
             const payload = { from:'in', ts:Date.now(), wamid:m.key.id };
             const im=m.message?.imageMessage, au=m.message?.audioMessage, doc=m.message?.documentMessage, vi=m.message?.videoMessage, stk=m.message?.stickerMessage, rea=m.message?.reactionMessage, loc=m.message?.locationMessage||m.message?.liveLocationMessage;
@@ -180,7 +184,7 @@ app.post('/send', auth, async (req,res)=>{
     const inst=waOf(req); const { to, text }=req.body;
     if (inst.status!=='connected') return res.json({ ok:false, error:'WhatsApp '+inst.id+' no conectado.' });
     const r=await inst.sock.sendMessage(String(to).replace(/\D/g,'')+'@s.whatsapp.net', { text });
-    inst.lastSend=Date.now(); log('📨 send WA'+inst.id+' ok');
+        inst.lastSend=Date.now(); if(r?.key?.id){ inst.sentIds.add(r.key.id); setTimeout(()=>inst.sentIds.delete(r.key.id),60000); } log('📨 send WA'+inst.id+' ok');
     res.json({ ok:true, wamid:r?.key?.id });
   }catch(e){ try{ reconnect(waOf(req)); }catch(_){} res.status(500).json({ ok:false, error:String(e.message||e) }); }
 });
@@ -198,7 +202,7 @@ app.post('/sendMedia', auth, async (req,res)=>{
       catch(e){ r=await inst.sock.sendMessage(jid, { document: buf, mimetype:'audio/mpeg', fileName: fileName||'audio.ogg' }); }
     }
     else r=await inst.sock.sendMessage(jid, { document: buf, mimetype: mime||'application/octet-stream', fileName: fileName||'archivo', caption: caption||undefined });
-    inst.lastSend=Date.now(); log('📨 sendMedia WA'+inst.id+' ok → '+url);
+        inst.lastSend=Date.now(); if(r?.key?.id){ inst.sentIds.add(r.key.id); setTimeout(()=>inst.sentIds.delete(r.key.id),60000); } log('📨 sendMedia WA'+inst.id+' ok → '+url);
     res.json({ ok:true, wamid:r?.key?.id, url });
   }catch(e){ try{ reconnect(waOf(req)); }catch(_){} res.status(500).json({ ok:false, error:String(e.message||e) }); }
 });
