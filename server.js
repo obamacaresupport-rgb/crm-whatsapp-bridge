@@ -1,10 +1,12 @@
 import express from 'express';
 import cors from 'cors';
+import fs from 'fs';
+import path from 'path';
 import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, downloadMediaMessage } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
-import fs from 'fs';
-import Jimp from 'jimp';
 import admin from 'firebase-admin';
+import { createClient } from '@supabase/supabase-js';
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 
 process.on('uncaughtException', e => console.error('[KEEP-ALIVE]', e.message));
 process.on('unhandledRejection', e => console.error('[KEEP-ALIVE]', String((e && e.message) || e)));
@@ -15,34 +17,61 @@ const jidDigits = j => (j||'').split('@')[0].split(':')[0].replace(/\D/g,'');
 
 admin.initializeApp({ credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)) });
 const db = admin.firestore();
+const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
+const s3 = new S3Client({ region:'auto', endpoint: process.env.R2_ENDPOINT, credentials:{ accessKeyId: process.env.R2_ACCESS_KEY_ID, secretAccessKey: process.env.R2_SECRET_ACCESS_KEY } });
+const R2_BUCKET = process.env.R2_BUCKET || 'crm-nexus-media';
+const R2_PUBLIC = process.env.R2_PUBLIC || '';
 
 const DBG=[]; function log(...a){ const s=a.map(x=>(x&&typeof x==='object')?JSON.stringify(x):String(x)).join(' '); DBG.push(s); if(DBG.length>300) DBG.shift(); console.log(s); }
-function mkInst(id){ return { id, sock:null, qr:null, status:'disconnected', connecting:false, dir:'./session'+id, presence:{}, lastEvent:0, lastSend:0 }; }
+function mkInst(id){ return { id, sock:null, qr:null, status:'disconnected', connecting:false, dir:'./session'+id, presence:{}, lastEvent:0, lastSend:0, pushT:null }; }
 const INST = { 1: mkInst(1), 2: mkInst(2) };
 function reconnect(inst){ log('♻️ reconectando WA'+inst.id); inst.status='disconnected'; inst.connecting=false; connect(inst); }
 
-async function storeMedia(cid, buf, mime, fileName){
-  const b64 = buf.toString('base64'); const CHUNK = 700*1024;
-  const attId = Date.now()+'_'+Math.random().toString(36).slice(2,8);
-  const parts = []; for(let i=0;i<b64.length;i+=CHUNK) parts.push(b64.slice(i,i+CHUNK));
-  const batch = db.batch();
-  const attRef = db.collection('clients').doc(cid).collection('attachments').doc(attId);
-  batch.set(attRef,{mime,fileName,size:buf.length,n:parts.length,ts:Date.now()});
-  parts.forEach((p,i)=>batch.set(attRef.collection('chunks').doc(String(i).padStart(4,'0')),{i,d:p}));
-  await batch.commit(); return attId;
+/* ---------- R2: subir media y devolver URL pública ---------- */
+const extOf = m => (m||'').includes('jpeg')?'jpg':(m||'').includes('webp')?'webp':(m||'').includes('png')?'png':(m||'').includes('ogg')?'ogg':(m||'').includes('mp4')?'mp4':(m||'').includes('pdf')?'pdf':'bin';
+async function r2Put(buf, mime, inst){
+  const key = `wa${inst}/${Date.now()}_${Math.random().toString(36).slice(2,7)}.${extOf(mime)}`;
+  await s3.send(new PutObjectCommand({ Bucket: R2_BUCKET, Key: key, Body: buf, ContentType: mime||'application/octet-stream' }));
+  return (R2_PUBLIC ? R2_PUBLIC : process.env.R2_ENDPOINT.replace('https://','https://pub-') ) + '/' + key;
 }
+
+/* ---------- Supabase Storage: sesiones persistentes ---------- */
+async function pullSession(inst){
+  try{
+    const { data } = await sb.storage.from('wa-sessions').list('s'+inst.id, { limit: 1000 });
+    if(!data||!data.length) return log('☁️ WA'+inst.id+' sin sesión previa');
+    for(const f of data){
+      const { data: blob, error } = await sb.storage.from('wa-sessions').download(`s${inst.id}/${f.name}`);
+      if(!error) fs.writeFileSync(path.join(inst.dir, f.name), Buffer.from(await blob.arrayBuffer()));
+    }
+    log('☁️ sesión WA'+inst.id+' restaurada ('+data.length+' archivos)');
+  }catch(e){ log('pull:', e.message); }
+}
+async function pushSession(inst){
+  try{
+    const files = fs.readdirSync(inst.dir);
+    for(const f of files){
+      const buf = fs.readFileSync(path.join(inst.dir, f));
+      await sb.storage.from('wa-sessions').upload(`s${inst.id}/${f}`, buf, { upsert:true, contentType:'application/octet-stream' });
+    }
+    log('☁️ sesión WA'+inst.id+' respaldada ('+files.length+' archivos)');
+  }catch(e){ log('push:', e.message); }
+}
+function schedulePush(inst){ clearTimeout(inst.pushT); inst.pushT=setTimeout(()=>pushSession(inst), 3000); }
 
 async function connect(inst){
   if (inst.connecting) return; inst.connecting = true;
   try{
+    fs.mkdirSync(inst.dir, { recursive:true });
+    await pullSession(inst);
     const { state, saveCreds } = await useMultiFileAuthState(inst.dir);
     const ver = await fetchLatestBaileysVersion().catch(()=>({ version: undefined }));
     inst.sock = makeWASocket({ version: ver.version, auth: state, printQRInTerminal:false, browser:['CRM Nexus WA'+inst.id,'Chrome','1.0'], syncFullHistory:false, generateHighQualityLinkPreviews:false });
-    inst.sock.ev.on('creds.update', saveCreds);
+    inst.sock.ev.on('creds.update', (u)=>{ saveCreds(u); schedulePush(inst); });
     inst.sock.ev.on('connection.update', u => {
       try{
         if (u.qr){ inst.qr = u.qr; inst.status = 'waiting'; }
-        if (u.connection === 'open'){ inst.status = 'connected'; inst.qr = null; inst.lastEvent=Date.now(); log('✅ WA'+inst.id+' SESIÓN ABIERTA'); }
+        if (u.connection === 'open'){ inst.status = 'connected'; inst.qr = null; inst.lastEvent=Date.now(); schedulePush(inst); log('✅ WA'+inst.id+' SESIÓN ABIERTA'); }
         if (u.connection === 'close'){
           inst.status = 'disconnected';
           const code = new Boom(u.lastDisconnect?.error)?.output?.statusCode;
@@ -66,7 +95,6 @@ async function connect(inst){
             if (m.key.fromMe) continue;
             const rj = m.key.remoteJid||'';
             if (rj.endsWith('@broadcast') || rj.endsWith('@g.us')) continue;
-            log('📥 msg WA'+inst.id+':', rj, m.pushName||'');
             const payload = { from:'in', ts:Date.now(), wamid:m.key.id };
             const im=m.message?.imageMessage, au=m.message?.audioMessage, doc=m.message?.documentMessage, vi=m.message?.videoMessage, stk=m.message?.stickerMessage, rea=m.message?.reactionMessage, loc=m.message?.locationMessage||m.message?.liveLocationMessage;
             if (im||au||doc||vi||stk){
@@ -76,13 +104,8 @@ async function connect(inst){
                 payload.type=im?'image':(au?'audio':(vi?'video':(stk?'image':'file')));
                 payload.fileName=doc?.fileName||(au?'audio.ogg':(im?'imagen.jpg':(vi?'video.mp4':(stk?'sticker.webp':'archivo'))));
                 payload.size=buf?buf.length:0; payload.text=im?.caption||vi?.caption||(doc?doc.fileName:'');
-                let inlined=false;
-                if (buf && im){
-                  try{ const img=await Jimp.read(buf);
-                    for (const [w,q] of [[1024,0.7],[800,0.55],[640,0.4]]){ img.resize(w,Jimp.AUTO); const out=await img.getBufferAsync(Jimp.MIME_JPEG); if(out.length<=650*1024){ payload.url='data:image/jpeg;base64,'+out.toString('base64'); inlined=true; break; } } }catch(e){}
-                } else if (buf && (stk||au||vi) && buf.length<=650*1024){ payload.url='data:'+mime+';base64,'+buf.toString('base64'); inlined=true; }
-                if (!inlined && buf){ payload._buf=buf; payload._mime=mime; }
-              }catch(e){ log('media:',e.message); payload.text='📎 Adjunto no descargable'; }
+                if (buf){ payload.url = await r2Put(buf, mime, inst.id); }
+              }catch(e){ log('media:', e.message); payload.text='📎 Adjunto no descargable'; }
             } else if (rea){ payload.text='❤️ Reacción: '+(rea.text||''); }
             else if (loc){ payload.text='📍 Ubicación: https://maps.google.com/?q='+(loc.degrees||0)+','+(loc.minutes||0); }
             else { const text=m.message?.conversation||m.message?.extendedTextMessage?.text; if(!text) continue; payload.text=text; }
@@ -123,7 +146,6 @@ async function routeToCRM(inst, digits, payload, pushName, lid, wasLid){
       if (lid) data.lid=lid;
       const ref=await db.collection('clients').add(data); c={ id:ref.id };
     }
-    if (payload._buf){ try{ payload.att=await storeMedia(c.id,payload._buf,payload._mime||'application/octet-stream',payload.fileName||'archivo'); }catch(e){ payload.text=payload.text||'📎 Adjunto no almacenado'; } delete payload._buf; delete payload._mime; }
     await db.collection('clients').doc(c.id).collection('whatsapp').add(payload);
     await db.collection('clients').doc(c.id).update({ unread: admin.firestore.FieldValue.increment(1), lastMsgTs: payload.ts||Date.now(), hasChat:true });
     log('📥 ruteado WA'+inst.id+' →', c.id);
@@ -146,19 +168,13 @@ app.use(express.json({ limit:'15mb' }));
 const auth=(req,res,next)=> req.headers['x-token']===TOKEN ? next() : res.status(401).json({ok:false,error:'No autorizado'});
 const waOf=req=>{ const v=parseInt(req.query.wa||(req.body&&req.body.wa)||'1',10); return INST[v]||INST[1]; };
 
-app.get('/', (req,res)=> res.send('CRM Nexus WhatsApp Bridge v15 ✅'));
+app.get('/', (req,res)=> res.send('CRM Nexus WhatsApp Bridge v16 ✅'));
 app.get('/health', (req,res)=> res.json({ ok:true, wa1:INST[1].status, wa2:INST[2].status }));
-app.get('/dbg', (req,res)=> res.json({ ok:true, wa1:INST[1].status, wa2:INST[2].status, lastEvent1:INST[1].lastEvent, lastSend1:INST[1].lastSend, last: DBG.slice(-60) }));
+app.get('/dbg', (req,res)=> res.json({ ok:true, wa1:INST[1].status, wa2:INST[2].status, last: DBG.slice(-60) }));
 app.get('/qr', auth, (req,res)=>{ const inst=waOf(req); res.json({ ok:true, status:inst.status, qr:inst.qr }); });
 app.get('/presence', auth, (req,res)=>{ const inst=waOf(req); const now=Date.now(); const out={};
   for(const [jid,v] of Object.entries(inst.presence||{})){ if(now-(v.ts||0)<6000) out[jid]=true; }
   res.json({ ok:true, presence:out }); });
-app.get('/chats', auth, (req,res)=>{
-  const inst=waOf(req);
-  if (inst.status!=='connected') return res.json({ ok:false, error:'No conectado' });
-  const seen={}, list=[];
-  for (const c of Object.values(inst.sock.chats||{})){ const d=jidDigits(c.id); if(!d||d.length<10||d.length>15||seen[d]||c.id.endsWith('@g.us')) continue; seen[d]=1; list.push({jid:d,name:c.name||('+'+d)}); }
-  res.json({ ok:true, chats:list }); });
 app.post('/send', auth, async (req,res)=>{
   try{
     const inst=waOf(req); const { to, text }=req.body;
@@ -173,6 +189,7 @@ app.post('/sendMedia', auth, async (req,res)=>{
     const inst=waOf(req); const { to, mime, data, fileName, caption }=req.body;
     if (inst.status!=='connected') return res.json({ ok:false, error:'WhatsApp '+inst.id+' no conectado.' });
     const buf=Buffer.from((data||'').split(',')[1]||'', 'base64');
+    const url=await r2Put(buf, mime, inst.id);
     const jid=String(to).replace(/\D/g,'')+'@s.whatsapp.net';
     let r;
     if ((mime||'').startsWith('image/')) r=await inst.sock.sendMessage(jid, { image: buf, caption: caption||undefined });
@@ -181,8 +198,8 @@ app.post('/sendMedia', auth, async (req,res)=>{
       catch(e){ r=await inst.sock.sendMessage(jid, { document: buf, mimetype:'audio/mpeg', fileName: fileName||'audio.ogg' }); }
     }
     else r=await inst.sock.sendMessage(jid, { document: buf, mimetype: mime||'application/octet-stream', fileName: fileName||'archivo', caption: caption||undefined });
-    inst.lastSend=Date.now(); log('📨 sendMedia WA'+inst.id+' ok');
-    res.json({ ok:true, wamid:r?.key?.id });
+    inst.lastSend=Date.now(); log('📨 sendMedia WA'+inst.id+' ok → '+url);
+    res.json({ ok:true, wamid:r?.key?.id, url });
   }catch(e){ try{ reconnect(waOf(req)); }catch(_){} res.status(500).json({ ok:false, error:String(e.message||e) }); }
 });
 app.post('/react', auth, async (req,res)=>{
@@ -204,7 +221,7 @@ app.post('/edit', auth, async (req,res)=>{
   }catch(e){ res.status(500).json({ ok:false, error:String(e.message||e) }); }
 });
 
-app.listen(PORT, ()=>{ log('Bridge listo en puerto', PORT); connect(INST[1]); connect(INST[2]); });
+app.listen(PORT, ()=>{ log('Bridge v16 listo en puerto', PORT); connect(INST[1]); connect(INST[2]); });
 setInterval(async ()=>{ for(const inst of [INST[1],INST[2]]){
   if(inst.status==='connected'){
     try{ await inst.sock.sendPresenceUpdate('available'); }catch(e){ reconnect(inst); continue; }
