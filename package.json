@@ -1,13 +1,16 @@
 {
   "name": "crm-whatsapp-bridge",
+  "version": "16.0.0",
   "type": "module",
+  "main": "server.js",
   "scripts": { "start": "node server.js" },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.7.9",
+    "@aws-sdk/client-s3": "^3.600.0",
     "@hapi/boom": "^10.0.1",
-    "express": "^4.19.2",
+    "@supabase/supabase-js": "^2.45.0",
+    "@whiskeysockets/baileys": "^6.7.9",
     "cors": "^2.8.5",
-     "firebase-admin": "^12.3.0",
-    "jimp": "^0.22.12"
+    "express": "^4.19.2",
+    "firebase-admin": "^12.0.0"
   }
 }
