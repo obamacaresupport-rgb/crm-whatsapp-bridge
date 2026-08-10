@@ -4,7 +4,6 @@ import fs from 'fs';
 import path from 'path';
 import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, downloadMediaMessage } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
-import admin from 'firebase-admin';
 import { createClient } from '@supabase/supabase-js';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 
@@ -15,8 +14,6 @@ const PORT = process.env.PORT || 10000;
 const TOKEN = process.env.BRIDGE_TOKEN || 'CNX-BRIDGE-2026';
 const jidDigits = j => (j||'').split('@')[0].split(':')[0].replace(/\D/g,'');
 
-admin.initializeApp({ credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)) });
-const db = admin.firestore();
 const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 const s3 = new S3Client({ region:'auto', endpoint: process.env.R2_ENDPOINT, credentials:{ accessKeyId: process.env.R2_ACCESS_KEY_ID, secretAccessKey: process.env.R2_SECRET_ACCESS_KEY } });
 const R2_BUCKET = process.env.R2_BUCKET || 'crm-nexus-media';
@@ -27,35 +24,25 @@ function mkInst(id){ return { id, sock:null, qr:null, status:'disconnected', con
 const INST = { 1: mkInst(1), 2: mkInst(2) };
 function reconnect(inst){ log('♻️ reconectando WA'+inst.id); inst.status='disconnected'; inst.connecting=false; connect(inst); }
 
-/* ---------- R2: subir media y devolver URL pública ---------- */
 const extOf = m => (m||'').includes('jpeg')?'jpg':(m||'').includes('webp')?'webp':(m||'').includes('png')?'png':(m||'').includes('ogg')?'ogg':(m||'').includes('mp4')?'mp4':(m||'').includes('pdf')?'pdf':'bin';
 async function r2Put(buf, mime, inst){
   const key = `wa${inst}/${Date.now()}_${Math.random().toString(36).slice(2,7)}.${extOf(mime)}`;
   await s3.send(new PutObjectCommand({ Bucket: R2_BUCKET, Key: key, Body: buf, ContentType: mime||'application/octet-stream' }));
-  return (R2_PUBLIC ? R2_PUBLIC : process.env.R2_ENDPOINT.replace('https://','https://pub-') ) + '/' + key;
+  return R2_PUBLIC + '/' + key;
 }
 
-/* ---------- Supabase Storage: sesiones persistentes ---------- */
 async function pullSession(inst){
-  try{
-    const { data } = await sb.storage.from('wa-sessions').list('s'+inst.id, { limit: 1000 });
+  try{ const { data } = await sb.storage.from('wa-sessions').list('s'+inst.id, { limit: 1000 });
     if(!data||!data.length) return log('☁️ WA'+inst.id+' sin sesión previa');
-    for(const f of data){
-      const { data: blob, error } = await sb.storage.from('wa-sessions').download(`s${inst.id}/${f.name}`);
-      if(!error) fs.writeFileSync(path.join(inst.dir, f.name), Buffer.from(await blob.arrayBuffer()));
-    }
-    log('☁️ sesión WA'+inst.id+' restaurada ('+data.length+' archivos)');
-  }catch(e){ log('pull:', e.message); }
+    for(const f of data){ const { data: blob, error } = await sb.storage.from('wa-sessions').download(`s${inst.id}/${f.name}`);
+      if(!error) fs.writeFileSync(path.join(inst.dir, f.name), Buffer.from(await blob.arrayBuffer())); }
+    log('☁️ sesión WA'+inst.id+' restaurada'); }catch(e){ log('pull:', e.message); }
 }
 async function pushSession(inst){
-  try{
-    const files = fs.readdirSync(inst.dir);
-    for(const f of files){
-      const buf = fs.readFileSync(path.join(inst.dir, f));
-      await sb.storage.from('wa-sessions').upload(`s${inst.id}/${f}`, buf, { upsert:true, contentType:'application/octet-stream' });
-    }
-    log('☁️ sesión WA'+inst.id+' respaldada ('+files.length+' archivos)');
-  }catch(e){ log('push:', e.message); }
+  try{ const files = fs.readdirSync(inst.dir);
+    for(const f of files){ const buf = fs.readFileSync(path.join(inst.dir, f));
+      await sb.storage.from('wa-sessions').upload(`s${inst.id}/${f}`, buf, { upsert:true, contentType:'application/octet-stream' }); }
+    log('☁️ sesión WA'+inst.id+' respaldada'); }catch(e){ log('push:', e.message); }
 }
 function schedulePush(inst){ clearTimeout(inst.pushT); inst.pushT=setTimeout(()=>pushSession(inst), 3000); }
 
@@ -71,7 +58,7 @@ async function connect(inst){
     inst.sock.ev.on('connection.update', u => {
       try{
         if (u.qr){ inst.qr = u.qr; inst.status = 'waiting'; }
-                if (u.connection === 'open'){ inst.status = 'connected'; inst.qr = null; inst.lastEvent=Date.now(); inst.own=jidDigits(inst.sock.user?.id||''); schedulePush(inst); log('✅ WA'+inst.id+' SESIÓN ABIERTA (número propio: '+inst.own+')'); }
+        if (u.connection === 'open'){ inst.status = 'connected'; inst.qr = null; inst.lastEvent=Date.now(); inst.own=jidDigits(inst.sock.user?.id||''); schedulePush(inst); log('✅ WA'+inst.id+' SESIÓN ABIERTA'); }
         if (u.connection === 'close'){
           inst.status = 'disconnected';
           const code = new Boom(u.lastDisconnect?.error)?.output?.statusCode;
@@ -88,9 +75,8 @@ async function connect(inst){
     inst.sock.ev.on('messages.upsert', async ({ messages, type }) => {
       try{
         inst.lastEvent=Date.now();
-        log('📥 upsert WA'+inst.id+' type='+type+' n='+messages.length);
         if (type !== 'notify') return;
-                for (const m of messages){
+        for (const m of messages){
           try{
             const rj = m.key.remoteJid||'';
             if (m.key.fromMe){
@@ -99,6 +85,7 @@ async function connect(inst){
               log('🪞 mensaje propio WA'+inst.id);
             }
             if (rj.endsWith('@broadcast') || rj.endsWith('@g.us')) continue;
+            log('📥 msg WA'+inst.id+':', rj, m.pushName||'');
             const payload = { from:'in', ts:Date.now(), wamid:m.key.id };
             const im=m.message?.imageMessage, au=m.message?.audioMessage, doc=m.message?.documentMessage, vi=m.message?.videoMessage, stk=m.message?.stickerMessage, rea=m.message?.reactionMessage, loc=m.message?.locationMessage||m.message?.liveLocationMessage;
             if (im||au||doc||vi||stk){
@@ -126,43 +113,44 @@ async function connect(inst){
   inst.connecting = false;
 }
 
-let waSettingsCache=null, waSettingsAt=0;
-async function getWaSettings(){ const now=Date.now(); if(waSettingsCache&&now-waSettingsAt<60000) return waSettingsCache; try{ const d=await db.collection('config').doc('waSettings').get(); waSettingsCache=d.exists?d.data():{}; }catch(e){ waSettingsCache={}; } waSettingsAt=now; return waSettingsCache; }
+async function allClients(){ const { data } = await sb.from('clients').select('*'); return (data||[]).map(r=>({id:r.id,...(r.data||{})})); }
+async function getWaSettings(){ const v = await sb.from('config').select('value').eq('key','waSettings').single().catch(()=>({data:null})); return v.data? v.data.value : {}; }
 
-async function matchClient(snap, inst, digits, lid, pushName){
+async function matchClient(clients, inst, digits, lid, pushName){
   let c=null;
-  if (lid) c=snap.docs.find(d=>(d.data().lid||'')!=='' && (d.data().lid||'')===lid && (d.data().waInst||1)===Number(inst.id));
+  if (lid) c=clients.find(d=>(d.lid||'')!=='' && d.lid===lid && (d.waInst||1)===Number(inst.id));
   if (!c && !lid && digits && digits.length>=10 && digits.length<=15){
-    c=snap.docs.find(d=>(d.data().telefono||'').replace(/\D/g,'')===digits && (d.data().waInst||1)===Number(inst.id));
-    if(!c) c=snap.docs.find(d=>{ const t=(d.data().telefono||'').replace(/\D/g,''); return t.length>=7 && (digits.endsWith(t)||t.endsWith(digits)); });
+    c=clients.find(d=>(d.telefono||'').replace(/\D/g,'')===digits && (d.waInst||1)===Number(inst.id));
+    if(!c) c=clients.find(d=>{ const t=(d.telefono||'').replace(/\D/g,''); return t.length>=7 && (digits.endsWith(t)||t.endsWith(digits)); });
   }
-  if (!c && pushName) c=snap.docs.find(d=>String(d.data().nombre||'').trim().toLowerCase()===String(pushName).trim().toLowerCase() && (d.data().waInst||1)===Number(inst.id));
+  if (!c && pushName) c=clients.find(d=>String(d.nombre||'').trim().toLowerCase()===String(pushName).trim().toLowerCase() && (d.waInst||1)===Number(inst.id));
   return c;
 }
 async function routeToCRM(inst, digits, payload, pushName, lid, wasLid){
   try{
-    const snap=await db.collection('clients').get();
-    let c=await matchClient(snap, inst, digits, lid, pushName);
-    if (c && lid && c.id){ try{ const cur=await db.collection('clients').doc(c.id).get(); if(cur.exists && !cur.data().lid) await cur.ref.update({lid}); }catch(e){} }
+    const clients = await allClients();
+    let c = await matchClient(clients, inst, digits, lid, pushName);
+    if (c && lid){ await sb.from('clients').update({data:{...( await sb.from('clients').select('*').eq('id',c.id).single()).data.data, lid}}).eq('id',c.id).catch(()=>{}); }
     if (!c){
       const ws=await getWaSettings(); const set=(ws&&ws[inst.id])||{};
       const data={ nombre:pushName||('+'+(digits||'desconocido')), telefono:(!wasLid&&digits&&digits.length>=10&&digits.length<=15)?digits:'', pipeline:set.pipelineInbound||'Sin Contactos', stage:'Nuevo lead', origen:'WhatsApp', waInst:Number(inst.id), unread:1, hasChat:true, lastMsgTs:payload.ts||Date.now(), createdAt:Date.now() };
       if (lid) data.lid=lid;
-      const ref=await db.collection('clients').add(data); c={ id:ref.id };
+      const ref=await sb.from('clients').insert({data}).select().single(); c={ id:ref.data.id };
     }
-    await db.collection('clients').doc(c.id).collection('whatsapp').add(payload);
-    await db.collection('clients').doc(c.id).update({ unread: admin.firestore.FieldValue.increment(1), lastMsgTs: payload.ts||Date.now(), hasChat:true });
+    await sb.from('client_messages').insert({ client_id:c.id, ts:payload.ts||Date.now(), data:payload });
+    const cur=await sb.from('clients').select('*').eq('id',c.id).single();
+    await sb.from('clients').update({data:{...(cur.data.data||{}), unread:((cur.data.data||{}).unread||0)+1, lastMsgTs:payload.ts||Date.now(), hasChat:true}}).eq('id',c.id);
     log('📥 ruteado WA'+inst.id+' →', c.id);
   }catch(e){ log('route:', e.message); }
 }
 async function routeReceipt(inst, digits, wamid, st){
   try{
     if(!digits||!wamid) return;
-    const snap=await db.collection('clients').get();
-    const c=await matchClient(snap, inst, digits, '', '');
+    const clients = await allClients();
+    const c = await matchClient(clients, inst, digits, '', '');
     if(!c) return;
-    const q=await db.collection('clients').doc(c.id).collection('whatsapp').where('wamid','==',wamid).get();
-    for(const d of q.docs) await d.ref.update({ rc: st });
+    const { data } = await sb.from('client_messages').select('*').filter('data->>wamid','eq',wamid).limit(1);
+    if(data&&data[0]){ const merged={...(data[0].data||{}), rc:st}; await sb.from('client_messages').update({data:merged}).eq('id',data[0].id); }
   }catch(e){}
 }
 
@@ -172,7 +160,7 @@ app.use(express.json({ limit:'15mb' }));
 const auth=(req,res,next)=> req.headers['x-token']===TOKEN ? next() : res.status(401).json({ok:false,error:'No autorizado'});
 const waOf=req=>{ const v=parseInt(req.query.wa||(req.body&&req.body.wa)||'1',10); return INST[v]||INST[1]; };
 
-app.get('/', (req,res)=> res.send('CRM Nexus WhatsApp Bridge v16 ✅'));
+app.get('/', (req,res)=> res.send('CRM Nexus WhatsApp Bridge v17 ✅ (Supabase)'));
 app.get('/health', (req,res)=> res.json({ ok:true, wa1:INST[1].status, wa2:INST[2].status }));
 app.get('/dbg', (req,res)=> res.json({ ok:true, wa1:INST[1].status, wa2:INST[2].status, last: DBG.slice(-60) }));
 app.get('/qr', auth, (req,res)=>{ const inst=waOf(req); res.json({ ok:true, status:inst.status, qr:inst.qr }); });
@@ -184,7 +172,7 @@ app.post('/send', auth, async (req,res)=>{
     const inst=waOf(req); const { to, text }=req.body;
     if (inst.status!=='connected') return res.json({ ok:false, error:'WhatsApp '+inst.id+' no conectado.' });
     const r=await inst.sock.sendMessage(String(to).replace(/\D/g,'')+'@s.whatsapp.net', { text });
-        inst.lastSend=Date.now(); if(r?.key?.id){ inst.sentIds.add(r.key.id); setTimeout(()=>inst.sentIds.delete(r.key.id),60000); } log('📨 send WA'+inst.id+' ok');
+    inst.lastSend=Date.now(); if(r?.key?.id){ inst.sentIds.add(r.key.id); setTimeout(()=>inst.sentIds.delete(r.key.id),60000); } log('📨 send WA'+inst.id+' ok');
     res.json({ ok:true, wamid:r?.key?.id });
   }catch(e){ try{ reconnect(waOf(req)); }catch(_){} res.status(500).json({ ok:false, error:String(e.message||e) }); }
 });
@@ -202,7 +190,7 @@ app.post('/sendMedia', auth, async (req,res)=>{
       catch(e){ r=await inst.sock.sendMessage(jid, { document: buf, mimetype:'audio/mpeg', fileName: fileName||'audio.ogg' }); }
     }
     else r=await inst.sock.sendMessage(jid, { document: buf, mimetype: mime||'application/octet-stream', fileName: fileName||'archivo', caption: caption||undefined });
-        inst.lastSend=Date.now(); if(r?.key?.id){ inst.sentIds.add(r.key.id); setTimeout(()=>inst.sentIds.delete(r.key.id),60000); } log('📨 sendMedia WA'+inst.id+' ok → '+url);
+    inst.lastSend=Date.now(); if(r?.key?.id){ inst.sentIds.add(r.key.id); setTimeout(()=>inst.sentIds.delete(r.key.id),60000); } log('📨 sendMedia WA'+inst.id+' ok → '+url);
     res.json({ ok:true, wamid:r?.key?.id, url });
   }catch(e){ try{ reconnect(waOf(req)); }catch(_){} res.status(500).json({ ok:false, error:String(e.message||e) }); }
 });
@@ -225,7 +213,7 @@ app.post('/edit', auth, async (req,res)=>{
   }catch(e){ res.status(500).json({ ok:false, error:String(e.message||e) }); }
 });
 
-app.listen(PORT, ()=>{ log('Bridge v16 listo en puerto', PORT); connect(INST[1]); connect(INST[2]); });
+app.listen(PORT, ()=>{ log('Bridge v17 listo en puerto', PORT); connect(INST[1]); connect(INST[2]); });
 setInterval(async ()=>{ for(const inst of [INST[1],INST[2]]){
   if(inst.status==='connected'){
     try{ await inst.sock.sendPresenceUpdate('available'); }catch(e){ reconnect(inst); continue; }
