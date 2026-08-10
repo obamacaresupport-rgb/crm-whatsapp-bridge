@@ -113,7 +113,7 @@ async function connect(inst){
   inst.connecting = false;
 }
 
-async function allClients(){ const { data } = await sb.from('clients').select('*'); return (data||[]).map(r=>({id:r.id,...(r.data||{})})); }
+async function allClients(){ const { data, error } = await sb.from('clients').select('*'); if(error){ log('⛔ allClients:', error.message); return []; } return (data||[]).map(r=>({id:r.id,...(r.data||{})})); }
 async function getWaSettings(){ const v = await sb.from('config').select('value').eq('key','waSettings').single().catch(()=>({data:null})); return v.data? v.data.value : {}; }
 
 async function matchClient(clients, inst, digits, lid, pushName){
@@ -128,18 +128,26 @@ async function matchClient(clients, inst, digits, lid, pushName){
 }
 async function routeToCRM(inst, digits, payload, pushName, lid, wasLid){
   try{
+    log('🧭 route inicio WA'+inst.id+' digits='+digits);
     const clients = await allClients();
     let c = await matchClient(clients, inst, digits, lid, pushName);
-    if (c && lid){ await sb.from('clients').update({data:{...( await sb.from('clients').select('*').eq('id',c.id).single()).data.data, lid}}).eq('id',c.id).catch(()=>{}); }
+    log('🧭 match:', c?c.id:'(nuevo)');
+    if (c && lid){
+      const cur=await sb.from('clients').select('*').eq('id',c.id).single();
+      if(!cur.error) await sb.from('clients').update({data:{...(cur.data.data||{}), lid}}).eq('id',c.id);
+    }
     if (!c){
       const ws=await getWaSettings(); const set=(ws&&ws[inst.id])||{};
       const data={ nombre:pushName||('+'+(digits||'desconocido')), telefono:(!wasLid&&digits&&digits.length>=10&&digits.length<=15)?digits:'', pipeline:set.pipelineInbound||'Sin Contactos', stage:'Nuevo lead', origen:'WhatsApp', waInst:Number(inst.id), unread:1, hasChat:true, lastMsgTs:payload.ts||Date.now(), createdAt:Date.now() };
       if (lid) data.lid=lid;
-      const ref=await sb.from('clients').insert({data}).select().single(); c={ id:ref.data.id };
+      const ref=await sb.from('clients').insert({data}).select().single();
+      if(ref.error){ log('⛔ insert client:', ref.error.message); return; }
+      c={ id:ref.data.id };
     }
-    await sb.from('client_messages').insert({ client_id:c.id, ts:payload.ts||Date.now(), data:payload });
-    const cur=await sb.from('clients').select('*').eq('id',c.id).single();
-    await sb.from('clients').update({data:{...(cur.data.data||{}), unread:((cur.data.data||{}).unread||0)+1, lastMsgTs:payload.ts||Date.now(), hasChat:true}}).eq('id',c.id);
+    const ins=await sb.from('client_messages').insert({ client_id:c.id, ts:payload.ts||Date.now(), data:payload });
+    if(ins.error){ log('⛔ insert msg:', ins.error.message); return; }
+    const cur2=await sb.from('clients').select('*').eq('id',c.id).single();
+    if(!cur2.error) await sb.from('clients').update({data:{...(cur2.data.data||{}), unread:((cur2.data.data||{}).unread||0)+1, lastMsgTs:payload.ts||Date.now(), hasChat:true}}).eq('id',c.id);
     log('📥 ruteado WA'+inst.id+' →', c.id);
   }catch(e){ log('route:', e.message); }
 }
