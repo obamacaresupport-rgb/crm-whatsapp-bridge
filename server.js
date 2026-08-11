@@ -59,7 +59,10 @@ async function connect(inst){
     inst.sock.ev.on('connection.update', u => {
       try{
         if (u.qr){ inst.qr = u.qr; inst.status = 'waiting'; }
-        if (u.connection === 'open'){ inst.status = 'connected'; inst.qr = null; inst.lastEvent=Date.now(); inst.own=jidDigits(inst.sock.user?.id||''); inst.ownLid=jidDigits((inst.sock.user?.lid||'').split('@')[0]); schedulePush(inst); log('✅ WA'+inst.id+' SESIÓN ABIERTA'); }
+        if (u.connection === 'open'){ inst.status = 'connected'; inst.qr = null; inst.lastEvent=Date.now(); inst.own=jidDigits(inst.sock.user?.id||'');
+      inst.ownLid=jidDigits(String(inst.sock.authState?.creds?.me?.lid||inst.sock.user?.lid||'').split('@')[0]);
+      inst.ownName=normName(inst.sock.authState?.creds?.me?.name||inst.sock.user?.name||'');
+      log('🆔 WA'+inst.id+' own='+inst.own+' ownLid='+inst.ownLid+' ownName='+inst.ownName); schedulePush(inst); log('✅ WA'+inst.id+' SESIÓN ABIERTA'); }
         if (u.connection === 'close'){
           inst.status = 'disconnected';
           const code = new Boom(u.lastDisconnect?.error)?.output?.statusCode;
@@ -86,7 +89,7 @@ async function connect(inst){
             let fromDir='in';
             if (m.key.fromMe){
               if (inst.sentIds.has(m.key.id)) continue;
-              const isSelf = inst.own && (jidDigits(jidRaw)===inst.own || (wasLid && inst.ownLid && jidDigits(rj)===inst.ownLid));
+                            const isSelf = inst.own && (jidDigits(jidRaw)===inst.own || (wasLid && inst.ownLid && jidDigits(rj)===inst.ownLid) || (wasLid && m.pushName && inst.ownName && normName(m.pushName)===inst.ownName));
               if (isSelf){ jidRaw=inst.own+'@s.whatsapp.net'; log('🪞 mensaje propio WA'+inst.id); }
               else { fromDir='out'; log('📤 otro dispositivo WA'+inst.id+' → '+jidRaw); }
             }
