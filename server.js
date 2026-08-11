@@ -117,7 +117,7 @@ async function connect(inst){
             else { const text=m.message?.conversation||m.message?.extendedTextMessage?.text; if(!text) continue; payload.text=text; }
             let push = m.pushName;
             if (!push){ try{ push = (inst.sock.store?.contacts?.[rj]?.name) || (inst.sock.chats?.[rj]?.name) || ''; }catch(e){} }
-            const msgDbId = await routeToCRM(inst, jidDigits(jidRaw), payload, push, lid, wasLid);
+            const msgDbId = await routeToCRM(inst, jidDigits(jidRaw), payload, push, lid, wasLid && (jidRaw===rj));
             if (mediaFailed && msgDbId){
               (async()=>{ for(let i=1;i<=3;i++){
                 await new Promise(r=>setTimeout(r,15000*i));
@@ -180,8 +180,39 @@ async function routeToCRM(inst, digits, payload, pushName, lid, wasLid){
     const msgDbId=ins.data.id;
     const cur2=await sb.from('clients').select('*').eq('id',c.id).single();
     if(!cur2.error) await sb.from('clients').update({data:{...(cur2.data.data||{}), unread: payload.from==='in' ? (((cur2.data.data||{}).unread||0)+1) : ((cur2.data.data||{}).unread||0), lastMsgTs:payload.ts||Date.now(), hasChat:true}}).eq('id',c.id);
+    if (lid){ const curL=await sb.from('clients').select('*').eq('id',c.id).single(); if(!curL.error && !(curL.data.data||{}).telefono) scheduleLidResolve(inst, lid, c.id); }
     log('📥 ruteado WA'+inst.id+' →', c.id); return msgDbId;
   }catch(e){ log('route:', e.message); return null; }
+}
+const lidTimers={};
+function scheduleLidResolve(inst, lid, cid){
+  if(lidTimers[lid]) return; let n=0;
+  lidTimers[lid]=setInterval(async()=>{
+    n++;
+    try{
+      const pn=await inst.sock.signalRepository.lidMapping.getPNForLID(lid+'@lid');
+      const digits=jidDigits(pn||'');
+      if(digits){
+        clearInterval(lidTimers[lid]); delete lidTimers[lid];
+        log('🔓 LID resuelto:', lid, '→', digits);
+        const { data: rows } = await sb.from('clients').select('*');
+        const all=(rows||[]).map(r=>({id:r.id,...(r.data||{})}));
+        const existing=all.find(d=>(d.telefono||'').replace(/\D/g,'')===digits && (d.waInst||1)===Number(inst.id) && d.id!==cid);
+        if(existing){
+          await sb.from('client_messages').update({client_id:existing.id}).eq('client_id',cid);
+          const ex=await sb.from('clients').select('*').eq('id',existing.id).single();
+          if(!ex.error) await sb.from('clients').update({data:{...(ex.data.data||{}), lid}}).eq('id',existing.id);
+          await sb.from('clients').delete().eq('id',cid);
+          log('🔀 chat LID fusionado con', existing.id);
+        } else {
+          const cur=await sb.from('clients').select('*').eq('id',cid).single();
+          if(!cur.error) await sb.from('clients').update({data:{...(cur.data.data||{}), telefono:digits}}).eq('id',cid);
+        }
+        return;
+      }
+    }catch(e){}
+    if(n>=6){ clearInterval(lidTimers[lid]); delete lidTimers[lid]; }
+  },20000);
 }
 async function routeReceipt(inst, digits, wamid, st){
   try{
