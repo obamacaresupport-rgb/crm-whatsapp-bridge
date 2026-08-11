@@ -99,7 +99,9 @@ async function connect(inst){
             if (fromDir==='out'){ payload.autor='externo'; payload.autorName='📱 Otro dispositivo'; }
                         const im=m.message?.imageMessage, au=m.message?.audioMessage, doc=m.message?.documentMessage, vi=m.message?.videoMessage, stk=m.message?.stickerMessage, rea=m.message?.reactionMessage, loc=m.message?.locationMessage||m.message?.liveLocationMessage;
             let mediaFailed=false;
-            if (im||au||doc||vi||stk){
+            const mo0=im||au||doc||vi||stk;
+            if (mo0 && !mo0.url && mo0.directPath){ mo0.url='https://mmg.whatsapp.net'+mo0.directPath; }
+            if (mo0){
               try{
                 let buf=null;
                 try{ buf=await downloadMediaMessage(m,'buffer',{}, { reuploadRequest: (inst.sock.updateMediaMessage||inst.sock.reuploadRequest||(()=>{})).bind(inst.sock) }); }
@@ -109,7 +111,7 @@ async function connect(inst){
                 payload.fileName=doc?.fileName||(au?'audio.ogg':(im?'imagen.jpg':(vi?'video.mp4':(stk?'sticker.webp':'archivo'))));
                 payload.size=buf?buf.length:0; payload.text=im?.caption||vi?.caption||(doc?doc.fileName:'');
                 if (buf){ payload.url = await r2Put(buf, mime, inst.id); }
-              }catch(e){ log('media:', e.message); payload.text='📎 Adjunto no descargable'; mediaFailed=true; }
+               }catch(e){ log('media:', e.message, '| keys:', Object.keys(mo0||{}).join(','), '| url:', !!(mo0&&mo0.url), '| dp:', !!(mo0&&mo0.directPath)); payload.text='📎 Adjunto no descargable'; mediaFailed=true; }
             } else if (rea){ payload.text='❤️ Reacción: '+(rea.text||''); }
             else if (loc){ payload.text='📍 Ubicación: https://maps.google.com/?q='+(loc.degrees||0)+','+(loc.minutes||0); }
             else { const text=m.message?.conversation||m.message?.extendedTextMessage?.text; if(!text) continue; payload.text=text; }
