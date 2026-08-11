@@ -59,7 +59,7 @@ async function connect(inst){
     inst.sock.ev.on('connection.update', u => {
       try{
         if (u.qr){ inst.qr = u.qr; inst.status = 'waiting'; }
-        if (u.connection === 'open'){ inst.status = 'connected'; inst.qr = null; inst.lastEvent=Date.now(); inst.own=jidDigits(inst.sock.user?.id||''); schedulePush(inst); log('✅ WA'+inst.id+' SESIÓN ABIERTA'); }
+        if (u.connection === 'open'){ inst.status = 'connected'; inst.qr = null; inst.lastEvent=Date.now(); inst.own=jidDigits(inst.sock.user?.id||''); inst.ownLid=jidDigits((inst.sock.user?.lid||'').split('@')[0]); schedulePush(inst); log('✅ WA'+inst.id+' SESIÓN ABIERTA'); }
         if (u.connection === 'close'){
           inst.status = 'disconnected';
           const code = new Boom(u.lastDisconnect?.error)?.output?.statusCode;
@@ -79,13 +79,16 @@ async function connect(inst){
         if (type !== 'notify') return;
         for (const m of messages){
           try{
-            const rj = m.key.remoteJid||'';
+                        const rj = m.key.remoteJid||'';
+            const wasLid = rj.endsWith('@lid'); const lid = wasLid ? rj : '';
+            let jidRaw = rj;
+            if (wasLid){ try{ const pn = await inst.sock.signalRepository.lidMapping.getPNForLID(rj); if(pn) jidRaw = pn; }catch(e){} }
             let fromDir='in';
             if (m.key.fromMe){
               if (inst.sentIds.has(m.key.id)) continue;
-              const isSelf = inst.own && jidDigits(rj)===inst.own && !rj.endsWith('@lid');
-              if (isSelf){ log('🪞 mensaje propio WA'+inst.id); }
-              else { fromDir='out'; log('📤 enviado desde otro dispositivo WA'+inst.id+' → '+rj); }
+              const isSelf = inst.own && (jidDigits(jidRaw)===inst.own || (wasLid && inst.ownLid && jidDigits(rj)===inst.ownLid));
+              if (isSelf){ jidRaw=inst.own+'@s.whatsapp.net'; log('🪞 mensaje propio WA'+inst.id); }
+              else { fromDir='out'; log('📤 otro dispositivo WA'+inst.id+' → '+jidRaw); }
             }
             if (rj.endsWith('@broadcast') || rj.endsWith('@g.us')) continue;
             log('📥 msg WA'+inst.id+':', rj, m.pushName||'');
@@ -94,7 +97,9 @@ async function connect(inst){
             const im=m.message?.imageMessage, au=m.message?.audioMessage, doc=m.message?.documentMessage, vi=m.message?.videoMessage, stk=m.message?.stickerMessage, rea=m.message?.reactionMessage, loc=m.message?.locationMessage||m.message?.liveLocationMessage;
             if (im||au||doc||vi||stk){
               try{
-                const buf=await downloadMediaMessage(m,'buffer',{}, { reuploadRequest: inst.sock.updateMediaMessage });
+                let buf=null;
+                try{ buf=await downloadMediaMessage(m,'buffer',{}, { reuploadRequest: (inst.sock.updateMediaMessage||inst.sock.reuploadRequest||(()=>{})).bind(inst.sock) }); }
+                catch(e1){ log('media reintento:', e1.message); buf=await downloadMediaMessage(m); }
                 const mime=im?.mimetype||au?.mimetype||doc?.mimetype||vi?.mimetype||stk?.mimetype||'application/octet-stream';
                 payload.type=im?'image':(au?'audio':(vi?'video':(stk?'image':'file')));
                 payload.fileName=doc?.fileName||(au?'audio.ogg':(im?'imagen.jpg':(vi?'video.mp4':(stk?'sticker.webp':'archivo'))));
@@ -104,8 +109,6 @@ async function connect(inst){
             } else if (rea){ payload.text='❤️ Reacción: '+(rea.text||''); }
             else if (loc){ payload.text='📍 Ubicación: https://maps.google.com/?q='+(loc.degrees||0)+','+(loc.minutes||0); }
             else { const text=m.message?.conversation||m.message?.extendedTextMessage?.text; if(!text) continue; payload.text=text; }
-            let jidRaw = rj; const wasLid = rj.endsWith('@lid'); const lid = wasLid ? rj : '';
-            if (lid || jidDigits(jidRaw).length>15){ try{ const pn = await inst.sock.signalRepository.lidMapping.getPNForLID(jidRaw); if(pn) jidRaw = pn; }catch(e){} }
             let push = m.pushName;
             if (!push){ try{ push = (inst.sock.store?.contacts?.[rj]?.name) || (inst.sock.chats?.[rj]?.name) || ''; }catch(e){} }
             await routeToCRM(inst, jidDigits(jidRaw), payload, push, lid, wasLid);
