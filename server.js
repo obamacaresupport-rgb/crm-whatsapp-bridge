@@ -13,6 +13,7 @@ process.on('unhandledRejection', e => console.error('[KEEP-ALIVE]', String((e &&
 const PORT = process.env.PORT || 10000;
 const TOKEN = process.env.BRIDGE_TOKEN || 'CNX-BRIDGE-2026';
 const jidDigits = j => (j||'').split('@')[0].split(':')[0].replace(/\D/g,'');
+const normName = s => String(s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^\p{L}\p{N} ]/gu,'').replace(/\s+/g,' ').trim();
 
 const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 const s3 = new S3Client({ region:'auto', endpoint: process.env.R2_ENDPOINT, credentials:{ accessKeyId: process.env.R2_ACCESS_KEY_ID, secretAccessKey: process.env.R2_SECRET_ACCESS_KEY } });
@@ -126,7 +127,9 @@ async function matchClient(clients, inst, digits, lid, pushName){
     c=clients.find(d=>(d.telefono||'').replace(/\D/g,'')===digits && (d.waInst||1)===Number(inst.id));
     if(!c) c=clients.find(d=>{ const t=(d.telefono||'').replace(/\D/g,''); return t.length>=7 && (digits.endsWith(t)||t.endsWith(digits)); });
   }
-  if (!c && pushName) c=clients.find(d=>String(d.nombre||'').trim().toLowerCase()===String(pushName).trim().toLowerCase() && (d.waInst||1)===Number(inst.id));
+    if (!c && pushName){ const pn=normName(pushName);
+    if(pn) c=clients.find(d=>{ const n=normName(d.nombre); return !!n && (d.waInst||1)===Number(inst.id) && (n===pn||n.startsWith(pn+' ')||pn.startsWith(n+' ')); });
+  }
   return c;
 }
 async function routeToCRM(inst, digits, payload, pushName, lid, wasLid){
