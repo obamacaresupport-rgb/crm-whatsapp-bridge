@@ -168,7 +168,10 @@ async function routeToCRM(inst, digits, payload, pushName, lid, wasLid){
     }
     if (!c){
       const ws=await getWaSettings(); const set=(ws&&ws[inst.id])||{};
-      const data={ nombre:pushName||('+'+(digits||'desconocido')), telefono:(!wasLid&&digits&&digits.length>=10&&digits.length<=15)?digits:'', pipeline:set.pipelineInbound||'Sin Contactos', stage:'Nuevo lead', origen:'WhatsApp', waInst:Number(inst.id), unread:1, hasChat:true, lastMsgTs:payload.ts||Date.now(), createdAt:Date.now() };
+      const pname=set.pipelineInbound||'Sin Contactos';
+      const { data: pipes } = await sb.from('pipelines').select('*');
+      const pipe=(pipes||[]).find(p=>p.name===pname);
+      const data={ nombre:pushName||('+'+(digits||'desconocido')), telefono:(!wasLid&&digits&&digits.length>=10&&digits.length<=15)?digits:'', pipeline:pname, stage:(pipe?.stages||[])[0]||'Nuevo lead', origen:'WhatsApp', waInst:Number(inst.id), unread:1, hasChat:true, lastMsgTs:payload.ts||Date.now(), createdAt:Date.now() };
       if (lid) data.lid=lid;
       const ref=await sb.from('clients').insert({data}).select().single();
       if(ref.error){ log('⛔ insert client:', ref.error.message); return null; }
