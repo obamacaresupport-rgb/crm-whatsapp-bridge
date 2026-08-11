@@ -79,14 +79,17 @@ async function connect(inst){
         for (const m of messages){
           try{
             const rj = m.key.remoteJid||'';
+            let fromDir='in';
             if (m.key.fromMe){
+              if (inst.sentIds.has(m.key.id)) continue;
               const isSelf = inst.own && jidDigits(rj)===inst.own && !rj.endsWith('@lid');
-              if (!isSelf || inst.sentIds.has(m.key.id)) continue;
-              log('🪞 mensaje propio WA'+inst.id);
+              if (isSelf){ log('🪞 mensaje propio WA'+inst.id); }
+              else { fromDir='out'; log('📤 enviado desde otro dispositivo WA'+inst.id+' → '+rj); }
             }
             if (rj.endsWith('@broadcast') || rj.endsWith('@g.us')) continue;
             log('📥 msg WA'+inst.id+':', rj, m.pushName||'');
-            const payload = { from:'in', ts:Date.now(), wamid:m.key.id };
+            const payload = { from:fromDir, ts:Date.now(), wamid:m.key.id };
+            if (fromDir==='out'){ payload.autor='externo'; payload.autorName='📱 Otro dispositivo'; }
             const im=m.message?.imageMessage, au=m.message?.audioMessage, doc=m.message?.documentMessage, vi=m.message?.videoMessage, stk=m.message?.stickerMessage, rea=m.message?.reactionMessage, loc=m.message?.locationMessage||m.message?.liveLocationMessage;
             if (im||au||doc||vi||stk){
               try{
@@ -147,7 +150,7 @@ async function routeToCRM(inst, digits, payload, pushName, lid, wasLid){
     const ins=await sb.from('client_messages').insert({ client_id:c.id, ts:payload.ts||Date.now(), data:payload });
     if(ins.error){ log('⛔ insert msg:', ins.error.message); return; }
     const cur2=await sb.from('clients').select('*').eq('id',c.id).single();
-    if(!cur2.error) await sb.from('clients').update({data:{...(cur2.data.data||{}), unread:((cur2.data.data||{}).unread||0)+1, lastMsgTs:payload.ts||Date.now(), hasChat:true}}).eq('id',c.id);
+    if(!cur2.error) await sb.from('clients').update({data:{...(cur2.data.data||{}), unread: payload.from==='in' ? (((cur2.data.data||{}).unread||0)+1) : ((cur2.data.data||{}).unread||0), lastMsgTs:payload.ts||Date.now(), hasChat:true}}).eq('id',c.id);
     log('📥 ruteado WA'+inst.id+' →', c.id);
   }catch(e){ log('route:', e.message); }
 }
