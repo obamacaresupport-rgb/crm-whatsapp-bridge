@@ -150,6 +150,7 @@ async function routeToCRM(inst, digits, payload, pushName, lid, wasLid){
       if(ref.error){ log('⛔ insert client:', ref.error.message); return; }
       c={ id:ref.data.id };
     }
+    if (payload.wamid){ const dup=await sb.from('client_messages').select('id').filter('data->>wamid','eq',payload.wamid).limit(1); if(dup.data&&dup.data.length){ log('♻️ duplicado omitido'); return; } }
     const ins=await sb.from('client_messages').insert({ client_id:c.id, ts:payload.ts||Date.now(), data:payload });
     if(ins.error){ log('⛔ insert msg:', ins.error.message); return; }
     const cur2=await sb.from('clients').select('*').eq('id',c.id).single();
