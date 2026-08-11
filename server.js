@@ -196,7 +196,7 @@ app.post('/sendMedia', auth, async (req,res)=>{
     const inst=waOf(req); const { to, mime, data, fileName, caption }=req.body;
     if (inst.status!=='connected') return res.json({ ok:false, error:'WhatsApp '+inst.id+' no conectado.' });
     const buf=Buffer.from((data||'').split(',')[1]||'', 'base64');
-    const url=await r2Put(buf, mime, inst.id);
+    let url=''; try{ url=await r2Put(buf, mime, inst.id); }catch(e){ log('⛔ r2 sendMedia:', e.message); }
     const jid=String(to).replace(/\D/g,'')+'@s.whatsapp.net';
     let r;
     if ((mime||'').startsWith('image/')) r=await inst.sock.sendMessage(jid, { image: buf, caption: caption||undefined });
