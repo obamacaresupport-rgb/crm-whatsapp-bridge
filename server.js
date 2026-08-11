@@ -114,7 +114,7 @@ async function connect(inst){
 }
 
 async function allClients(){ const { data, error } = await sb.from('clients').select('*'); if(error){ log('⛔ allClients:', error.message); return []; } return (data||[]).map(r=>({id:r.id,...(r.data||{})})); }
-async function getWaSettings(){ const v = await sb.from('config').select('value').eq('key','waSettings').single().catch(()=>({data:null})); return v.data? v.data.value : {}; }
+async function getWaSettings(){ try{ const { data } = await sb.from('config').select('value').eq('key','waSettings').maybeSingle(); return data? data.value : {}; }catch(e){ return {}; } }
 
 async function matchClient(clients, inst, digits, lid, pushName){
   let c=null;
