@@ -97,7 +97,8 @@ async function connect(inst){
             log('📥 msg WA'+inst.id+':', rj, m.pushName||'');
             const payload = { from:fromDir, ts:Date.now(), wamid:m.key.id };
             if (fromDir==='out'){ payload.autor='externo'; payload.autorName='📱 Otro dispositivo'; }
-            const im=m.message?.imageMessage, au=m.message?.audioMessage, doc=m.message?.documentMessage, vi=m.message?.videoMessage, stk=m.message?.stickerMessage, rea=m.message?.reactionMessage, loc=m.message?.locationMessage||m.message?.liveLocationMessage;
+                        const im=m.message?.imageMessage, au=m.message?.audioMessage, doc=m.message?.documentMessage, vi=m.message?.videoMessage, stk=m.message?.stickerMessage, rea=m.message?.reactionMessage, loc=m.message?.locationMessage||m.message?.liveLocationMessage;
+            let mediaFailed=false;
             if (im||au||doc||vi||stk){
               try{
                 let buf=null;
@@ -108,13 +109,28 @@ async function connect(inst){
                 payload.fileName=doc?.fileName||(au?'audio.ogg':(im?'imagen.jpg':(vi?'video.mp4':(stk?'sticker.webp':'archivo'))));
                 payload.size=buf?buf.length:0; payload.text=im?.caption||vi?.caption||(doc?doc.fileName:'');
                 if (buf){ payload.url = await r2Put(buf, mime, inst.id); }
-              }catch(e){ log('media:', e.message); payload.text='📎 Adjunto no descargable'; }
+              }catch(e){ log('media:', e.message); payload.text='📎 Adjunto no descargable'; mediaFailed=true; }
             } else if (rea){ payload.text='❤️ Reacción: '+(rea.text||''); }
             else if (loc){ payload.text='📍 Ubicación: https://maps.google.com/?q='+(loc.degrees||0)+','+(loc.minutes||0); }
             else { const text=m.message?.conversation||m.message?.extendedTextMessage?.text; if(!text) continue; payload.text=text; }
             let push = m.pushName;
             if (!push){ try{ push = (inst.sock.store?.contacts?.[rj]?.name) || (inst.sock.chats?.[rj]?.name) || ''; }catch(e){} }
-            await routeToCRM(inst, jidDigits(jidRaw), payload, push, lid, wasLid);
+            const msgDbId = await routeToCRM(inst, jidDigits(jidRaw), payload, push, lid, wasLid);
+            if (mediaFailed && msgDbId){
+              (async()=>{ for(let i=1;i<=3;i++){
+                await new Promise(r=>setTimeout(r,15000*i));
+                try{
+                  const buf2=await downloadMediaMessage(m,'buffer',{}, { reuploadRequest: (inst.sock.updateMediaMessage||(()=>{})).bind(inst.sock) });
+                  if(buf2){
+                    const mime2=im?.mimetype||au?.mimetype||doc?.mimetype||vi?.mimetype||stk?.mimetype||'application/octet-stream';
+                    const url2=await r2Put(buf2,mime2,inst.id);
+                    const row=await sb.from('client_messages').select('*').eq('id',msgDbId).single();
+                    if(!row.error){ const d={...(row.data.data||{}), url:url2, size:buf2.length}; if(d.text==='📎 Adjunto no descargable') d.text=''; await sb.from('client_messages').update({data:d}).eq('id',msgDbId); log('🔄 media recuperada en intento '+i); }
+                    return;
+                  }
+                }catch(e){ log('media retry'+i+':', e.message); }
+              } })();
+            }
           }catch(e){ log('[msg]', e.message); }
         }
       }catch(e){ log('[upsert]', e.message); }
@@ -153,16 +169,17 @@ async function routeToCRM(inst, digits, payload, pushName, lid, wasLid){
       const data={ nombre:pushName||('+'+(digits||'desconocido')), telefono:(!wasLid&&digits&&digits.length>=10&&digits.length<=15)?digits:'', pipeline:set.pipelineInbound||'Sin Contactos', stage:'Nuevo lead', origen:'WhatsApp', waInst:Number(inst.id), unread:1, hasChat:true, lastMsgTs:payload.ts||Date.now(), createdAt:Date.now() };
       if (lid) data.lid=lid;
       const ref=await sb.from('clients').insert({data}).select().single();
-      if(ref.error){ log('⛔ insert client:', ref.error.message); return; }
+      if(ref.error){ log('⛔ insert client:', ref.error.message); return null; }
       c={ id:ref.data.id };
     }
     if (payload.wamid){ const dup=await sb.from('client_messages').select('id').filter('data->>wamid','eq',payload.wamid).limit(1); if(dup.data&&dup.data.length){ log('♻️ duplicado omitido'); return; } }
-    const ins=await sb.from('client_messages').insert({ client_id:c.id, ts:payload.ts||Date.now(), data:payload });
-    if(ins.error){ log('⛔ insert msg:', ins.error.message); return; }
+    const ins=await sb.from('client_messages').insert({ client_id:c.id, ts:payload.ts||Date.now(), data:payload }).select().single();
+    if(ins.error){ log('⛔ insert msg:', ins.error.message); return null; }
+    const msgDbId=ins.data.id;
     const cur2=await sb.from('clients').select('*').eq('id',c.id).single();
     if(!cur2.error) await sb.from('clients').update({data:{...(cur2.data.data||{}), unread: payload.from==='in' ? (((cur2.data.data||{}).unread||0)+1) : ((cur2.data.data||{}).unread||0), lastMsgTs:payload.ts||Date.now(), hasChat:true}}).eq('id',c.id);
-    log('📥 ruteado WA'+inst.id+' →', c.id);
-  }catch(e){ log('route:', e.message); }
+    log('📥 ruteado WA'+inst.id+' →', c.id); return msgDbId;
+  }catch(e){ log('route:', e.message); return null; }
 }
 async function routeReceipt(inst, digits, wamid, st){
   try{
