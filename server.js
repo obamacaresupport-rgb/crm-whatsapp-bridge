@@ -90,7 +90,7 @@ async function connect(inst){
             const im=m.message?.imageMessage, au=m.message?.audioMessage, doc=m.message?.documentMessage, vi=m.message?.videoMessage, stk=m.message?.stickerMessage, rea=m.message?.reactionMessage, loc=m.message?.locationMessage||m.message?.liveLocationMessage;
             if (im||au||doc||vi||stk){
               try{
-                const buf=await downloadMediaMessage(m);
+                const buf=await downloadMediaMessage(m,'buffer',{}, { reuploadRequest: inst.sock.updateMediaMessage });
                 const mime=im?.mimetype||au?.mimetype||doc?.mimetype||vi?.mimetype||stk?.mimetype||'application/octet-stream';
                 payload.type=im?'image':(au?'audio':(vi?'video':(stk?'image':'file')));
                 payload.fileName=doc?.fileName||(au?'audio.ogg':(im?'imagen.jpg':(vi?'video.mp4':(stk?'sticker.webp':'archivo'))));
