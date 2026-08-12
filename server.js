@@ -90,7 +90,7 @@ async function connect(inst){
             let fromDir='in';
             if (m.key.fromMe){
               if (inst.sentIds.has(m.key.id)) continue;
-              const const isSelf = inst.own && (jidDigits(jidRaw)===inst.own || (wasLid && inst.ownLid && jidDigits(rj)===inst.ownLid));
+              const isSelf = inst.own && (jidDigits(jidRaw)===inst.own || (wasLid && inst.ownLid && jidDigits(rj)===inst.ownLid));
               if (isSelf){ jidRaw=inst.own+'@s.whatsapp.net'; log('🪞 mensaje propio WA'+inst.id); }
               else { fromDir='out'; log('📤 otro dispositivo WA'+inst.id+' → '+jidRaw); }
             }
