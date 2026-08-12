@@ -76,6 +76,7 @@ async function connect(inst){
       try{ for(const u of updates){ const st=u.update?.status; if(!u.key?.fromMe||!st||st<3) continue;
         await routeReceipt(inst, jidDigits(u.key.remoteJid), u.key.id, st); } }catch(e){}
     });
+    inst.sock.ev.on('messages.update', async(upds)=>{ try{ for(const u of upds){ const st=u.update&&u.update.status; const wid=u.key&&u.key.id; if(!wid||st==null) continue; const s=st===2?'sent':st===3?'delivered':(st===4||st===5)?'read':null; if(!s) continue; const { data:row }=await sb.from('client_messages').select('id,data').eq('data->>wamid',wid).limit(1); if(row&&row.length){ const d=row[0].data||{}; if(d.status!==s){ d.status=s; await sb.from('client_messages').update({data:d}).eq('id',row[0].id); log('✅ tick', s); } } } }catch(e){ log('[ticks]', e.message); } });
     inst.sock.ev.on('messages.upsert', async ({ messages, type }) => {
       try{
         inst.lastEvent=Date.now();
