@@ -105,12 +105,14 @@ async function connect(inst){
               try{
                 let buf=null;
                 try{ buf=await downloadMediaMessage(m,'buffer',{}, { reuploadRequest: (inst.sock.updateMediaMessage||inst.sock.reuploadRequest||(()=>{})).bind(inst.sock) }); }
-                catch(e1){ log('media reintento:', e1.message); buf=await downloadMediaMessage(m); }
+                catch(e1){ log('media reintento:', e1.message); try{ buf=await downloadMediaMessage(m); }catch(e2){ log('media fail final:', e2.message); mediaFailed=true; } }
                 const mime=im?.mimetype||au?.mimetype||doc?.mimetype||vi?.mimetype||stk?.mimetype||'application/octet-stream';
                 payload.type=im?'image':(au?'audio':(vi?'video':(stk?'image':'file')));
                 payload.fileName=doc?.fileName||(au?'audio.ogg':(im?'imagen.jpg':(vi?'video.mp4':(stk?'sticker.webp':'archivo'))));
                 payload.size=buf?buf.length:0; payload.text=im?.caption||vi?.caption||(doc?doc.fileName:'');
-                if (buf){ payload.url = await r2Put(buf, mime, inst.id); }
+                        let bufF=buf, mimeF=mime;
+        if(bufF && mimeF && mimeF.startsWith('image/') && !mimeF.includes('webp') && bufF.length>150*1024){ try{ const sharp=(await import('sharp')).default; bufF=await sharp(bufF).jpeg({quality:70,mozjpeg:true}).toBuffer(); mimeF='image/jpeg'; payload.fileName=(payload.fileName||'imagen').replace(/\.[^.]+$/,'')+'.jpg'; log('🗜️ img comprimida'); }catch(e){ log('sharp skip:', e.message); } }
+        if (bufF){ payload.size=bufF.length; payload.url = await r2Put(bufF, mimeF, inst.id); }
                }catch(e){ log('media:', e.message, '| keys:', Object.keys(mo0||{}).join(','), '| url:', !!(mo0&&mo0.url), '| dp:', !!(mo0&&mo0.directPath)); payload.text='📎 Adjunto no descargable'; mediaFailed=true; }
             } else if (rea){ payload.text='❤️ Reacción: '+(rea.text||''); }
             else if (loc){ payload.text='📍 Ubicación: https://maps.google.com/?q='+(loc.degrees||0)+','+(loc.minutes||0); }
